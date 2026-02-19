@@ -5,8 +5,6 @@ APP="IlyaAhmadi"
 TG="@ilyaahmadiii"
 
 PY="/opt/ilyaahmadi/ilyaahmadi.py"
-PY_URL="https://raw.githubusercontent.com/Zehnovik/ilyaahmadi-tunnel/main/ilyaahmadi.py"
-
 BASE="/etc/ilyaahmadi_manager"
 CONF="$BASE/profiles"
 MAX=10
@@ -16,22 +14,8 @@ pause(){ read -r -p "Press Enter to continue..." _ < /dev/tty || true; }
 
 ensure(){
   mkdir -p "$CONF"
-  mkdir -p "$(dirname "$PY")"
-
   command -v screen >/dev/null 2>&1 || (apt update -y && apt install -y screen) || true
   command -v python3 >/dev/null 2>&1 || (apt update -y && apt install -y python3) || true
-
-  if [[ ! -f "$PY" ]]; then
-    echo "[*] Python core not found. Downloading: $PY_URL"
-    if command -v curl >/dev/null 2>&1; then
-      curl -fsSL "$PY_URL" -o "$PY"
-    else
-      apt update -y && apt install -y wget >/dev/null 2>&1 || true
-      wget -qO "$PY" "$PY_URL"
-    fi
-    chmod +x "$PY"
-  fi
-
   [[ -f "$PY" ]] || { echo "Missing python file: $PY"; exit 1; }
 }
 
@@ -39,8 +23,12 @@ pick_role(){
   while true; do
     printf "1) EU\n2) IRAN\n" > /dev/tty
     read -r -p "Select: " x < /dev/tty
-    if [[ "$x" == "1" ]]; then echo "eu"; return 0
-    elif [[ "$x" == "2" ]]; then echo "iran"; return 0
+    if [[ "$x" == "1" ]]; then
+      echo "eu"
+      return 0
+    elif [[ "$x" == "2" ]]; then
+      echo "iran"
+      return 0
     fi
     echo "Invalid." > /dev/tty
   done
@@ -54,118 +42,214 @@ slot_status(){
 
 pick_slot(){
   local role="$1"
-  echo "" > /dev/tty
-  echo "Select ${role} slot (1..${MAX}):" > /dev/tty
-  echo "--------------------------------" > /dev/tty
-  for i in $(seq 1 "$MAX"); do
-    printf "  %s) %s%s %s\n" "$i" "$role" "$i" "$(slot_status "$role" "$i")" > /dev/tty
+  while true; do
+    printf "\nSelect %s slot (1..%d):\n" "$role" "$MAX" > /dev/tty
+    printf "--------------------------------\n" > /dev/tty
+    for i in $(seq 1 $MAX); do
+      printf "  %d) %s%d  %s\n" "$i" "$role" "$i" "$(slot_status "$role" "$i")" > /dev/tty
+    done
+    printf "--------------------------------\n" > /dev/tty
+    read -r -p "Slot number: " n < /dev/tty
+    if [[ "$n" =~ ^[0-9]+$ ]] && (( n>=1 && n<=MAX )); then
+      echo "${role}${n}"
+      return 0
+    fi
+    echo "Invalid slot." > /dev/tty
   done
-  echo "--------------------------------" > /dev/tty
-  read -r -p "Slot number: " slot < /dev/tty
-  [[ "$slot" =~ ^[0-9]+$ ]] && [[ "$slot" -ge 1 ]] && [[ "$slot" -le "$MAX" ]] || { echo "Invalid"; exit 1; }
-  echo "${role}${slot}"
+}
+
+show_profile(){
+  local prof="$1"
+  local file="$CONF/${prof}.env"
+  if [[ -f "$file" ]]; then
+    cat "$file" > /dev/tty
+  else
+    echo "Empty slot." > /dev/tty
+  fi
 }
 
 edit_profile(){
   local prof="$1"
-  local f="$CONF/${prof}.env"
-  local role="${prof%%[0-9]*}"
-  echo "" > /dev/tty
-  echo "Editing: $prof" > /dev/tty
+  local file="$CONF/${prof}.env"
+  local role="${prof//[0-9]/}"
+
+  if [[ -f "$file" ]]; then
+    echo "----- current -----" > /dev/tty
+    cat "$file" > /dev/tty
+    echo "-------------------" > /dev/tty
+    read -r -p "Reuse as-is? (y/n) [y]: " a < /dev/tty
+    [[ "${a,,}" != "n" ]] && return 0
+  fi
+
+  local IRAN_IP="" BRIDGE="" SYNC="" AUTO="" PORTS=""
 
   if [[ "$role" == "eu" ]]; then
     read -r -p "Iran IP: " IRAN_IP < /dev/tty
-    read -r -p "Bridge port (e.g. 7000): " BRIDGE < /dev/tty
-    read -r -p "Sync port   (e.g. 7001): " SYNC < /dev/tty
-    cat >"$f" <<EOF
-ROLE=eu
-IRAN_IP=$IRAN_IP
-BRIDGE=$BRIDGE
-SYNC=$SYNC
-EOF
-  else
-    read -r -p "Bridge port (e.g. 7000): " BRIDGE < /dev/tty
-    read -r -p "Sync port   (e.g. 7001): " SYNC < /dev/tty
-    read -r -p "Auto-Sync ports from EU? (y/n): " AS < /dev/tty
+  fi
+
+  read -r -p "Bridge port: " BRIDGE < /dev/tty
+  read -r -p "Sync port: " SYNC < /dev/tty
+
+  if [[ "$role" == "iran" ]]; then
+    read -r -p "Auto-sync? (y/n) [y]: " AS < /dev/tty
+    AS="${AS:-y}"
     if [[ "${AS,,}" == "y" ]]; then
-      cat >"$f" <<EOF
-ROLE=iran
-BRIDGE=$BRIDGE
-SYNC=$SYNC
-AUTO_SYNC=true
-PORTS=
-EOF
+      AUTO="y"
+      PORTS=""
     else
-      read -r -p "Manual ports CSV (e.g. 80,443,2083): " PORTS < /dev/tty
-      cat >"$f" <<EOF
-ROLE=iran
-BRIDGE=$BRIDGE
-SYNC=$SYNC
-AUTO_SYNC=false
-PORTS=$PORTS
-EOF
+      AUTO="n"
+      read -r -p "Manual ports CSV (e.g. 80,443): " PORTS < /dev/tty
     fi
   fi
 
-  echo "[+] Saved $f" > /dev/tty
+  cat >"$file" <<EOF
+ROLE=$role
+IRAN_IP=$IRAN_IP
+BRIDGE=$BRIDGE
+SYNC=$SYNC
+AUTO=$AUTO
+PORTS=$PORTS
+EOF
+
+  echo "[+] Saved: $file" > /dev/tty
 }
+
+session_name(){ echo "ilya_${1}"; }
 
 run_slot(){
   local prof="$1"
-  local f="$CONF/${prof}.env"
-  [[ -f "$f" ]] || { echo "Profile not found: $prof" > /dev/tty; return 1; }
+  local file="$CONF/${prof}.env"
+  [[ -f "$file" ]] || { echo "Empty slot. Create profile first." > /dev/tty; return 1; }
   # shellcheck disable=SC1090
-  source "$f"
+  source "$file"
 
-  local s="ilya_${prof}"
+  local s; s="$(session_name "$prof")"
   screen -S "$s" -X quit >/dev/null 2>&1 || true
 
   if [[ "$ROLE" == "eu" ]]; then
     screen -dmS "$s" bash -lc "printf '1\n%s\n%s\n%s\n' '$IRAN_IP' '$BRIDGE' '$SYNC' | python3 '$PY'"
   else
-    if [[ "${AUTO_SYNC:-true}" == "true" ]]; then
+    if [[ "${AUTO:-y}" == "y" ]]; then
       screen -dmS "$s" bash -lc "printf '2\n%s\n%s\ny\n' '$BRIDGE' '$SYNC' | python3 '$PY'"
     else
-      screen -dmS "$s" bash -lc "printf '2\n%s\n%s\nn\n%s\n' '$BRIDGE' '$SYNC' '${PORTS:-}' | python3 '$PY'"
+      screen -dmS "$s" bash -lc "printf '2\n%s\n%s\nn\n%s\n' '$BRIDGE' '$SYNC' '$PORTS' | python3 '$PY'"
     fi
   fi
 
-  echo "[+] Started in screen session: $s" > /dev/tty
+  echo "[+] Started in screen: $s" > /dev/tty
 }
 
 stop_slot(){
   local prof="$1"
-  local s="ilya_${prof}"
+  local s; s="$(session_name "$prof")"
   screen -S "$s" -X quit >/dev/null 2>&1 || true
   echo "[+] Stopped: $s" > /dev/tty
 }
 
 logs_slot(){
   local prof="$1"
-  local s="ilya_${prof}"
-  echo "[i] Attaching to screen: $s (Ctrl+A then D to detach)" > /dev/tty
-  screen -r "$s" || true
+  local s; s="$(session_name "$prof")"
+  screen -r "$s"
+}
+
+make_service(){
+  local prof="$1"
+  local svc="ilyaahmadi-${prof}.service"
+  cat >/etc/systemd/system/"$svc" <<EOF
+[Unit]
+Description=$APP Manager Slot $prof | $TG
+After=network.target
+
+[Service]
+Type=forking
+ExecStart=/usr/local/bin/ilyaahmadi-manager.sh start $prof
+ExecStop=/usr/local/bin/ilyaahmadi-manager.sh stop $prof
+RemainAfterExit=yes
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable --now "$svc"
+  echo "[+] Service enabled: $svc" > /dev/tty
+}
+
+remove_service(){
+  local prof="$1"
+  local svc="ilyaahmadi-${prof}.service"
+  systemctl stop "$svc" >/dev/null 2>&1 || true
+  systemctl disable "$svc" >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/"$svc"
+  systemctl daemon-reload
+  echo "[+] Service removed: $svc" > /dev/tty
+}
+
+cron_enable(){
+  local prof="$1"
+  local svc="ilyaahmadi-${prof}.service"
+  read -r -p "Interval minutes (e.g. 5): " m < /dev/tty
+  [[ "$m" =~ ^[0-9]+$ ]] && (( m>=1 && m<=60 )) || { echo "Invalid" > /dev/tty; return 1; }
+  local line="*/$m * * * * systemctl is-active --quiet $svc || systemctl restart $svc"
+  (crontab -l 2>/dev/null | grep -v "systemctl is-active --quiet $svc" || true; echo "$line") | crontab -
+  echo "[+] Cron watchdog added for $svc" > /dev/tty
+}
+
+cron_disable(){
+  local prof="$1"
+  local svc="ilyaahmadi-${prof}.service"
+  (crontab -l 2>/dev/null | grep -v "systemctl is-active --quiet $svc" || true) | crontab -
+  echo "[+] Cron watchdog removed for $svc" > /dev/tty
 }
 
 manage_menu(){
+  local role prof
+  role="$(pick_role)"
+  prof="$(pick_slot "$role")"
+
   while true; do
-    echo "" > /dev/tty
-    echo "1) Show profile" > /dev/tty
-    echo "2) Start (screen)" > /dev/tty
-    echo "3) Stop (screen)" > /dev/tty
-    echo "4) Logs (attach screen)" > /dev/tty
-    echo "5) Back" > /dev/tty
+    clear || true
+    echo "=============================================="
+    echo " Manage: $prof  |  $APP  |  $TG"
+    echo "=============================================="
+    echo "1) Show config"
+    echo "2) Start (screen)"
+    echo "3) Stop (screen)"
+    echo "4) Restart (screen)"
+    echo "5) Logs (attach screen)"
+    echo "6) Re-enter settings"
+    echo "7) Create/Enable systemd service"
+    echo "8) Remove systemd service"
+    echo "9) Enable cron watchdog"
+    echo "10) Disable cron watchdog"
+    echo "11) Back"
+    echo "----------------------------------------------"
     read -r -p "Select: " c < /dev/tty
     case "$c" in
-      1) role="$(pick_role)"; prof="$(pick_slot "$role")"; cat "$CONF/${prof}.env" > /dev/tty; pause ;;
-      2) role="$(pick_role)"; prof="$(pick_slot "$role")"; run_slot "$prof"; pause ;;
-      3) role="$(pick_role)"; prof="$(pick_slot "$role")"; stop_slot "$prof"; pause ;;
-      4) role="$(pick_role)"; prof="$(pick_slot "$role")"; logs_slot "$prof" ;;
-      5) return ;;
-      *) echo "Invalid" > /dev/tty ;;
+      1) show_profile "$prof"; pause ;;
+      2) run_slot "$prof"; pause ;;
+      3) stop_slot "$prof"; pause ;;
+      4) stop_slot "$prof"; run_slot "$prof"; pause ;;
+      5) logs_slot "$prof" ;;
+      6) edit_profile "$prof"; pause ;;
+      7) make_service "$prof"; pause ;;
+      8) remove_service "$prof"; pause ;;
+      9) cron_enable "$prof"; pause ;;
+      10) cron_disable "$prof"; pause ;;
+      11) return ;;
+      *) echo "Invalid" > /dev/tty; sleep 1 ;;
     esac
   done
 }
+
+# CLI subcommands for systemd
+cmd="${1:-}"
+if [[ "$cmd" == "start" ]]; then
+  need_root; ensure; run_slot "${2:?slot}"; exit 0
+elif [[ "$cmd" == "stop" ]]; then
+  need_root; ensure; stop_slot "${2:?slot}"; exit 0
+fi
 
 need_root
 ensure
@@ -173,12 +257,12 @@ ensure
 while true; do
   clear || true
   echo "=============================================="
-  echo " $APP Tunnel Manager | $TG"
+  echo " $APP Tunnel Manager (Wrapper) | $TG"
   echo "=============================================="
   echo "1) Create/Update profile"
   echo "2) Start slot"
   echo "3) Stop slot"
-  echo "4) Logs slot"
+  echo "4) Manage tunnel (menu)"
   echo "5) Exit"
   echo "----------------------------------------------"
   read -r -p "Select: " c < /dev/tty
@@ -186,7 +270,7 @@ while true; do
     1) role="$(pick_role)"; prof="$(pick_slot "$role")"; edit_profile "$prof"; pause ;;
     2) role="$(pick_role)"; prof="$(pick_slot "$role")"; run_slot "$prof"; pause ;;
     3) role="$(pick_role)"; prof="$(pick_slot "$role")"; stop_slot "$prof"; pause ;;
-    4) role="$(pick_role)"; prof="$(pick_slot "$role")"; logs_slot "$prof" ;;
+    4) manage_menu ;;
     5) exit 0 ;;
     *) echo "Invalid"; sleep 1 ;;
   esac
