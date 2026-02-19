@@ -3,11 +3,12 @@ set -euo pipefail
 
 APP="IlyaAhmadi"
 TG="@ilyaahmadiii"
+VERSION="1.0.0"
 
 PY="/opt/ilyaahmadi/ilyaahmadi.py"
 PY_URL="https://raw.githubusercontent.com/Zehnovik/ilyaahmadi-tunnel/main/ilyaahmadi.py"
 
-SELF_URL="https://raw.githubusercontent.com/Zehnovik/ilyaahmadi-tunnel/main/IlyaAhmadi-tunnel.sh"
+SELF_URL="https://raw.githubusercontent.com/Zehnovik/ilyaahmadi-tunnel/main/IlyaAhmadi-Tunnel.sh"
 INSTALL_PATH="/usr/local/bin/ilya-tunnel"
 
 BASE="/etc/ilyaahmadi_manager"
@@ -29,6 +30,10 @@ fetch_url_to(){
     command -v wget >/dev/null 2>&1 || (apt update -y && apt install -y wget) || true
     wget -qO "$out" "$url"
   fi
+}
+
+is_installed(){
+  [[ -x "$INSTALL_PATH" ]]
 }
 
 ensure(){
@@ -74,10 +79,18 @@ update_script(){
   fi
 
   chmod +x "$tmp"
-  mv -f "$tmp" "$INSTALL_PATH"
-  chmod +x "$INSTALL_PATH"
 
-  echo "[+] Updated. Run again: sudo ilya-tunnel" > /dev/tty
+  if is_installed; then
+    mv -f "$tmp" "$INSTALL_PATH"
+    chmod +x "$INSTALL_PATH"
+    echo "[+] Updated. Run again: sudo ilya-tunnel" > /dev/tty
+  else
+    echo "[i] Script is not installed to $INSTALL_PATH" > /dev/tty
+    echo "[i] Saving updated copy to current directory: ./IlyaAhmadi-Tunnel.sh" > /dev/tty
+    mv -f "$tmp" "./IlyaAhmadi-Tunnel.sh"
+    chmod +x "./IlyaAhmadi-Tunnel.sh"
+    echo "[+] Updated file saved locally. Run: sudo bash ./IlyaAhmadi-Tunnel.sh" > /dev/tty
+  fi
 }
 
 disable_cron_healthcheck(){
@@ -325,9 +338,12 @@ enable_cron_healthcheck(){
   echo "[+] Cron enabled (every 1 minute)." > /dev/tty
 }
 
-manage_menu(){
+manage_slot_menu(){
+  local prof="$1"
   while true; do
     echo "" > /dev/tty
+    echo "Manage slot: $prof"
+    echo "--------------------------------"
     echo "1) Show profile"
     echo "2) Start (screen)"
     echo "3) Stop (screen)"
@@ -335,21 +351,17 @@ manage_menu(){
     echo "5) Status"
     echo "6) Logs (attach screen)"
     echo "7) Delete slot (stop + delete profile)"
-    echo "8) Enable cron health-check"
-    echo "9) Disable cron health-check"
-    echo "10) Back"
+    echo "8) Back"
     read -r -p "Select: " c < /dev/tty
     case "$c" in
-      1) role="$(pick_role)"; prof="$(pick_slot "$role")"; cat "$CONF/${prof}.env" > /dev/tty; pause ;;
-      2) role="$(pick_role)"; prof="$(pick_slot "$role")"; run_slot "$prof"; pause ;;
-      3) role="$(pick_role)"; prof="$(pick_slot "$role")"; stop_slot "$prof"; pause ;;
-      4) role="$(pick_role)"; prof="$(pick_slot "$role")"; restart_slot "$prof"; pause ;;
-      5) role="$(pick_role)"; prof="$(pick_slot "$role")"; status_slot "$prof"; pause ;;
-      6) role="$(pick_role)"; prof="$(pick_slot "$role")"; logs_slot "$prof" ;;
-      7) role="$(pick_role)"; prof="$(pick_slot "$role")"; delete_slot "$prof"; pause ;;
-      8) enable_cron_healthcheck; pause ;;
-      9) disable_cron_healthcheck; pause ;;
-      10) return ;;
+      1) cat "$CONF/${prof}.env" 2>/dev/null > /dev/tty || echo "Profile not found." > /dev/tty; pause ;;
+      2) run_slot "$prof"; pause ;;
+      3) stop_slot "$prof"; pause ;;
+      4) restart_slot "$prof"; pause ;;
+      5) status_slot "$prof"; pause ;;
+      6) logs_slot "$prof" ;;
+      7) delete_slot "$prof"; pause ;;
+      8) return ;;
       *) echo "Invalid." > /dev/tty ;;
     esac
   done
@@ -360,24 +372,32 @@ ensure
 
 while true; do
   clear || true
+  INSTALLED_STATE="NOT INSTALLED"
+  if is_installed; then INSTALLED_STATE="INSTALLED"; fi
+
   echo "=============================================="
-  echo " $APP Tunnel Manager | $TG"
+  echo " $APP Tunnel Manager v$VERSION | $TG"
+  echo " Installed: $INSTALLED_STATE"
   echo "=============================================="
   echo "1) Create/Update profile"
-  echo "2) Manage tunnel"
-  echo "3) Install script (system-wide)"
-  echo "4) Update script (self-update)"
-  echo "5) Uninstall script"
-  echo "6) Exit"
+  echo "2) Manage tunnel (select slot)"
+  echo "3) Enable cron health-check"
+  echo "4) Disable cron health-check"
+  echo "5) Install script (system-wide)"
+  echo "6) Update script (self-update)"
+  echo "7) Uninstall script"
+  echo "8) Exit"
   echo "----------------------------------------------"
   read -r -p "Select: " c < /dev/tty
   case "$c" in
     1) role="$(pick_role)"; prof="$(pick_slot "$role")"; edit_profile "$prof"; pause ;;
-    2) manage_menu ;;
-    3) install_script; pause ;;
-    4) update_script; pause ;;
-    5) uninstall_script; pause ;;
-    6) exit 0 ;;
+    2) role="$(pick_role)"; prof="$(pick_slot "$role")"; manage_slot_menu "$prof" ;;
+    3) enable_cron_healthcheck; pause ;;
+    4) disable_cron_healthcheck; pause ;;
+    5) install_script; pause ;;
+    6) update_script; pause ;;
+    7) uninstall_script; pause ;;
+    8) exit 0 ;;
     *) echo "Invalid."; sleep 1 ;;
   esac
 done
