@@ -5,6 +5,8 @@ APP="IlyaAhmadi"
 TG="@ilyaahmadiii"
 
 PY="/opt/ilyaahmadi/ilyaahmadi.py"
+PY_URL="https://raw.githubusercontent.com/Zehnovik/ilyaahmadi-tunnel/main/ilyaahmadi.py"
+
 BASE="/etc/ilyaahmadi_manager"
 CONF="$BASE/profiles"
 MAX=10
