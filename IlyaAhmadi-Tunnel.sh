@@ -35,7 +35,6 @@ ensure(){
   [[ -f "$PY" ]] || { echo "Missing python file: $PY"; exit 1; }
 }
 
-# ----------------- (بقیه فایل شما بدون تغییر) -----------------
 pick_role(){
   while true; do
     printf "1) EU\n2) IRAN\n" > /dev/tty
