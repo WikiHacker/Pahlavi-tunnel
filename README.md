@@ -28,9 +28,5 @@ Reverse TCP Tunnel + Port Auto-Sync + Multi-Profile Manager
 ## ⚡ نصب سریع (One Command)
 روی هر دو سرور (ایران و خارج) فقط همین دستور را اجرا کنید:
 
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Zehnovik/ilyaahmadi-tunnel/main/ilyaahmadi_tunnel_manager.sh)
 
-- جدول تنظیمات
-- مثال‌های آماده
-- بخش Troubleshooting (ارورهای رایج مثل “file name too long”، “connection refused”، “pool empty” و …)
+bash <(curl -fsSL https://raw.githubusercontent.com/Zehnovik/ilyaahmadi-tunnel/main/IlyaAhmadi-Tunnel.sh)
