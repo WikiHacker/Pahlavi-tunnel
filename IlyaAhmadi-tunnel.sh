@@ -1,33 +1,67 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP="IlyaAhmadi"
-TG="@ilyaahmadiii"
+# ===================== Branding =====================
+APP_NAME="Pahlavi"
+TG_ID="@ilyaahmadiii"
 VERSION="1.0.0"
 
-PY="/opt/ilyaahmadi/ilyaahmadi.py"
+# Your repo info (display only)
+GITHUB_REPO="github.com/Zehnovik/ilyaahmadi-tunnel"
+
+# IMPORTANT: must match the exact file name in your GitHub repo (case-sensitive)
+SCRIPT_FILENAME="IlyaAhmadi-Tunnel.sh"
+SELF_URL="https://raw.githubusercontent.com/Zehnovik/ilyaahmadi-tunnel/main/${SCRIPT_FILENAME}"
+
+# ===================== Core paths =====================
+PY="/opt/pahlavi/ilyaahmadi.py"
 PY_URL="https://raw.githubusercontent.com/Zehnovik/ilyaahmadi-tunnel/main/ilyaahmadi.py"
 
-SELF_URL="https://raw.githubusercontent.com/Zehnovik/ilyaahmadi-tunnel/main/IlyaAhmadi-Tunnel.sh"
-INSTALL_PATH="/usr/local/bin/ilya-tunnel"
+INSTALL_PATH="/usr/local/bin/pahlavi-tunnel"
 
-BASE="/etc/ilyaahmadi_manager"
+BASE="/etc/pahlavi_manager"
 CONF="$BASE/profiles"
 MAX=10
 
-HC_SCRIPT="/usr/local/bin/ilya-health-check"
-HC_CRON_TAG="# IlyaAhmadiTunnelHealthCheck"
+HC_SCRIPT="/usr/local/bin/pahlavi-health-check"
+HC_CRON_TAG="# PahlaviTunnelHealthCheck"
+
+# ===================== Colors =====================
+if [[ -t 1 ]]; then
+  CLR_RESET="\033[0m"
+  CLR_DIM="\033[2m"
+  CLR_BOLD="\033[1m"
+  CLR_RED="\033[31m"
+  CLR_GREEN="\033[32m"
+  CLR_YELLOW="\033[33m"
+  CLR_BLUE="\033[34m"
+  CLR_MAGENTA="\033[35m"
+  CLR_CYAN="\033[36m"
+  CLR_WHITE="\033[97m"
+else
+  CLR_RESET=""; CLR_DIM=""; CLR_BOLD=""
+  CLR_RED=""; CLR_GREEN=""; CLR_YELLOW=""; CLR_BLUE=""; CLR_MAGENTA=""; CLR_CYAN=""; CLR_WHITE=""
+fi
 
 need_root(){ [[ "$(id -u)" == "0" ]] || { echo "Run as root (sudo -i)"; exit 1; }; }
 pause(){ read -r -p "Press Enter to continue..." _ < /dev/tty || true; }
 
+have(){ command -v "$1" >/dev/null 2>&1; }
+
+apt_try_install(){
+  local pkgs=("$@")
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -y >/dev/null 2>&1 || true
+  apt-get install -y "${pkgs[@]}" >/dev/null 2>&1 || true
+}
+
 fetch_url_to(){
   local url="$1"
   local out="$2"
-  if command -v curl >/dev/null 2>&1; then
+  if have curl; then
     curl -fsSL "$url" -o "$out"
   else
-    command -v wget >/dev/null 2>&1 || (apt update -y && apt install -y wget) || true
+    have wget || apt_try_install wget
     wget -qO "$out" "$url"
   fi
 }
@@ -40,8 +74,10 @@ ensure(){
   mkdir -p "$CONF"
   mkdir -p "$(dirname "$PY")"
 
-  command -v screen >/dev/null 2>&1 || (apt update -y && apt install -y screen) || true
-  command -v python3 >/dev/null 2>&1 || (apt update -y && apt install -y python3) || true
+  have screen  || apt_try_install screen
+  have python3 || apt_try_install python3
+  have curl    || apt_try_install curl
+  have figlet  || apt_try_install figlet
 
   if [[ ! -f "$PY" ]]; then
     echo "[*] Python core not found. Downloading: $PY_URL" > /dev/tty
@@ -52,26 +88,76 @@ ensure(){
   [[ -f "$PY" ]] || { echo "Missing python file: $PY"; exit 1; }
 }
 
+# ===================== System info (best-effort) =====================
+get_public_ip(){
+  local ip=""
+  ip="$(curl -fsSL --max-time 3 https://api.ipify.org 2>/dev/null || true)"
+  [[ -n "$ip" ]] || ip="$(curl -fsSL --max-time 3 https://ifconfig.me 2>/dev/null || true)"
+  echo "$ip"
+}
+
+get_ipinfo_field(){
+  local field="$1"
+  local ip="$2"
+  [[ -n "$ip" ]] || { echo ""; return 0; }
+  # ipinfo returns JSON; we do a simple extraction without jq
+  local json
+  json="$(curl -fsSL --max-time 4 "https://ipinfo.io/${ip}/json" 2>/dev/null || true)"
+  [[ -n "$json" ]] || { echo ""; return 0; }
+  echo "$json" | tr -d '\n' | sed -n "s/.*\"${field}\":[ ]*\"\\([^\"]*\\)\".*/\\1/p" | head -n1
+}
+
+get_location_string(){
+  local ip country region city
+  ip="$(get_public_ip)"
+  city="$(get_ipinfo_field city "$ip")"
+  region="$(get_ipinfo_field region "$ip")"
+  country="$(get_ipinfo_field country "$ip")"
+  if [[ -n "$city" || -n "$region" || -n "$country" ]]; then
+    echo "${city}${city:+, }${region}${region:+, }${country}"
+  else
+    echo "Unknown"
+  fi
+}
+
+get_datacenter_string(){
+  local ip org
+  ip="$(get_public_ip)"
+  org="$(get_ipinfo_field org "$ip")"
+  if [[ -n "$org" ]]; then
+    echo "$org"
+  else
+    # fallback signals
+    local hn
+    hn="$(hostnamectl 2>/dev/null | sed -n 's/.*Hardware Vendor:[ ]*//p' | head -n1 || true)"
+    [[ -n "$hn" ]] && echo "$hn" || echo "Unknown"
+  fi
+}
+
+# ===================== Install / Update / Uninstall =====================
 install_script(){
-  echo "[*] Installing script to: $INSTALL_PATH" > /dev/tty
+  echo "[*] Installing to: $INSTALL_PATH" > /dev/tty
   mkdir -p "$(dirname "$INSTALL_PATH")"
 
+  # Prefer copying local file if executed from a real path
   if [[ -f "$0" ]] && [[ "$0" != "bash" ]] && [[ "$0" != "/dev/fd/"* ]]; then
     cp -f "$0" "$INSTALL_PATH"
   else
+    # When running via process-substitution, download from GitHub
     fetch_url_to "$SELF_URL" "$INSTALL_PATH"
   fi
 
   chmod +x "$INSTALL_PATH"
-  echo "[+] Installed. Run: sudo ilya-tunnel" > /dev/tty
+  echo "[+] Installed. Run: sudo pahlavi-tunnel" > /dev/tty
 }
 
 update_script(){
-  echo "[*] Updating script from: $SELF_URL" > /dev/tty
+  echo "[*] Updating from: $SELF_URL" > /dev/tty
   local tmp
   tmp="$(mktemp)"
   fetch_url_to "$SELF_URL" "$tmp"
 
+  # Sanity check
   if ! head -n 1 "$tmp" | grep -q "bash"; then
     echo "[-] Update failed: invalid file downloaded." > /dev/tty
     rm -f "$tmp"
@@ -83,13 +169,11 @@ update_script(){
   if is_installed; then
     mv -f "$tmp" "$INSTALL_PATH"
     chmod +x "$INSTALL_PATH"
-    echo "[+] Updated. Run again: sudo ilya-tunnel" > /dev/tty
+    echo "[+] Updated. Run again: sudo pahlavi-tunnel" > /dev/tty
   else
-    echo "[i] Script is not installed to $INSTALL_PATH" > /dev/tty
-    echo "[i] Saving updated copy to current directory: ./IlyaAhmadi-Tunnel.sh" > /dev/tty
-    mv -f "$tmp" "./IlyaAhmadi-Tunnel.sh"
-    chmod +x "./IlyaAhmadi-Tunnel.sh"
-    echo "[+] Updated file saved locally. Run: sudo bash ./IlyaAhmadi-Tunnel.sh" > /dev/tty
+    mv -f "$tmp" "./${SCRIPT_FILENAME}"
+    chmod +x "./${SCRIPT_FILENAME}"
+    echo "[+] Updated file saved locally: ./${SCRIPT_FILENAME}" > /dev/tty
   fi
 }
 
@@ -109,6 +193,7 @@ uninstall_script(){
   echo "[+] Uninstalled: $INSTALL_PATH" > /dev/tty
 }
 
+# ===================== Profiles / Slots =====================
 pick_role(){
   while true; do
     printf "1) EU\n2) IRAN\n" > /dev/tty
@@ -183,7 +268,7 @@ EOF
   echo "[+] Saved $f" > /dev/tty
 }
 
-session_name(){ echo "ilya_$1"; }
+session_name(){ echo "pahlavi_$1"; }
 
 is_running(){
   local prof="$1"
@@ -237,14 +322,15 @@ status_slot(){
   fi
   # shellcheck disable=SC1090
   source "$f"
+
   local s; s="$(session_name "$prof")"
-  local st="OFF"
-  if is_running "$prof"; then st="ON"; fi
+  local st="${CLR_RED}OFF${CLR_RESET}"
+  if is_running "$prof"; then st="${CLR_GREEN}ON${CLR_RESET}"; fi
 
   echo "--------------------------------" > /dev/tty
   echo "Profile: $prof" > /dev/tty
   echo "Session: $s" > /dev/tty
-  echo "Running: $st" > /dev/tty
+  echo -e "Running: $st" > /dev/tty
   echo "ROLE=$ROLE BRIDGE=$BRIDGE SYNC=$SYNC" > /dev/tty
   if [[ "${ROLE}" == "eu" ]]; then
     echo "IRAN_IP=$IRAN_IP" > /dev/tty
@@ -273,6 +359,7 @@ logs_slot(){
   screen -r "$s" || true
 }
 
+# ===================== Cron health-check =====================
 install_healthcheck_script(){
   cat >"$HC_SCRIPT" <<EOF
 #!/usr/bin/env bash
@@ -282,7 +369,7 @@ PY="${PY}"
 CONF="${CONF}"
 MAX="${MAX}"
 
-session_name(){ echo "ilya_\$1"; }
+session_name(){ echo "pahlavi_\$1"; }
 
 is_running(){
   local prof="\$1"
@@ -338,20 +425,52 @@ enable_cron_healthcheck(){
   echo "[+] Cron enabled (every 1 minute)." > /dev/tty
 }
 
+# ===================== UI =====================
+print_banner(){
+  local loc dc installed_state
+  loc="$(get_location_string)"
+  dc="$(get_datacenter_string)"
+  installed_state="${CLR_RED}NOT INSTALLED${CLR_RESET}"
+  if is_installed; then installed_state="${CLR_GREEN}INSTALLED${CLR_RESET}"; fi
+
+  echo -e "${CLR_CYAN}${CLR_BOLD}"
+  if have figlet; then
+    figlet -f slant "$APP_NAME" 2>/dev/null || figlet "$APP_NAME" 2>/dev/null || true
+  else
+    cat <<'EOF'
+ ____       _     _           _
+|  _ \ __ _| |__ | | __ _ ___(_)
+| |_) / _` | '_ \| |/ _` / __| |
+|  __/ (_| | | | | | (_| \__ \ |
+|_|   \__,_|_| |_|_|\__,_|___/_|
+EOF
+  fi
+  echo -e "${CLR_RESET}"
+
+  echo -e "${CLR_GREEN}Version:${CLR_RESET} v${VERSION}"
+  echo -e "${CLR_GREEN}GitHub:${CLR_RESET} ${GITHUB_REPO}"
+  echo -e "${CLR_GREEN}Telegram ID:${CLR_RESET} ${TG_ID}"
+  echo -e "${CLR_DIM}============================================================${CLR_RESET}"
+  echo -e "${CLR_CYAN}Location:${CLR_RESET} ${loc}"
+  echo -e "${CLR_CYAN}Datacenter:${CLR_RESET} ${dc}"
+  echo -e "${CLR_CYAN}Script:${CLR_RESET} ${installed_state}"
+  echo -e "${CLR_DIM}============================================================${CLR_RESET}"
+}
+
 manage_slot_menu(){
   local prof="$1"
   while true; do
     echo "" > /dev/tty
-    echo "Manage slot: $prof"
-    echo "--------------------------------"
-    echo "1) Show profile"
-    echo "2) Start (screen)"
-    echo "3) Stop (screen)"
-    echo "4) Restart (screen)"
-    echo "5) Status"
-    echo "6) Logs (attach screen)"
-    echo "7) Delete slot (stop + delete profile)"
-    echo "8) Back"
+    echo -e "${CLR_YELLOW}${CLR_BOLD}Manage slot:${CLR_RESET} ${prof}" > /dev/tty
+    echo "--------------------------------" > /dev/tty
+    echo "1) Show profile" > /dev/tty
+    echo "2) Start (screen)" > /dev/tty
+    echo "3) Stop (screen)" > /dev/tty
+    echo "4) Restart (screen)" > /dev/tty
+    echo "5) Status" > /dev/tty
+    echo "6) Logs (attach screen)" > /dev/tty
+    echo "7) Delete slot (stop + delete profile)" > /dev/tty
+    echo "8) Back" > /dev/tty
     read -r -p "Select: " c < /dev/tty
     case "$c" in
       1) cat "$CONF/${prof}.env" 2>/dev/null > /dev/tty || echo "Profile not found." > /dev/tty; pause ;;
@@ -367,27 +486,24 @@ manage_slot_menu(){
   done
 }
 
+# ===================== Main =====================
 need_root
 ensure
 
 while true; do
   clear || true
-  INSTALLED_STATE="NOT INSTALLED"
-  if is_installed; then INSTALLED_STATE="INSTALLED"; fi
+  print_banner
 
-  echo "=============================================="
-  echo " $APP Tunnel Manager v$VERSION | $TG"
-  echo " Installed: $INSTALLED_STATE"
-  echo "=============================================="
-  echo "1) Create/Update profile"
-  echo "2) Manage tunnel (select slot)"
-  echo "3) Enable cron health-check"
-  echo "4) Disable cron health-check"
-  echo "5) Install script (system-wide)"
-  echo "6) Update script (self-update)"
-  echo "7) Uninstall script"
-  echo "8) Exit"
-  echo "----------------------------------------------"
+  echo -e "${CLR_WHITE}${CLR_BOLD}1.${CLR_RESET} Create/Update profile"
+  echo -e "${CLR_WHITE}${CLR_BOLD}2.${CLR_RESET} Manage tunnel (select slot)"
+  echo -e "${CLR_WHITE}${CLR_BOLD}3.${CLR_RESET} Enable cron health-check"
+  echo -e "${CLR_WHITE}${CLR_BOLD}4.${CLR_RESET} Disable cron health-check"
+  echo -e "${CLR_WHITE}${CLR_BOLD}5.${CLR_RESET} Install script (system-wide)"
+  echo -e "${CLR_WHITE}${CLR_BOLD}6.${CLR_RESET} Update script (self-update)"
+  echo -e "${CLR_WHITE}${CLR_BOLD}7.${CLR_RESET} Uninstall script"
+  echo -e "${CLR_WHITE}${CLR_BOLD}0.${CLR_RESET} Exit"
+  echo -e "${CLR_DIM}------------------------------------------------------------${CLR_RESET}"
+
   read -r -p "Select: " c < /dev/tty
   case "$c" in
     1) role="$(pick_role)"; prof="$(pick_slot "$role")"; edit_profile "$prof"; pause ;;
@@ -397,7 +513,7 @@ while true; do
     5) install_script; pause ;;
     6) update_script; pause ;;
     7) uninstall_script; pause ;;
-    8) exit 0 ;;
+    0) exit 0 ;;
     *) echo "Invalid."; sleep 1 ;;
   esac
 done
