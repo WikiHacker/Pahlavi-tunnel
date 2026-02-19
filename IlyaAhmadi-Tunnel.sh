@@ -16,6 +16,8 @@ pause(){ read -r -p "Press Enter to continue..." _ < /dev/tty || true; }
 
 ensure(){
   mkdir -p "$CONF"
+  mkdir -p "$(dirname "$PY")"
+  
   command -v screen >/dev/null 2>&1 || (apt update -y && apt install -y screen) || true
   command -v python3 >/dev/null 2>&1 || (apt update -y && apt install -y python3) || true
   [[ -f "$PY" ]] || { echo "Missing python file: $PY"; exit 1; }
