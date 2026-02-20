@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os, sys, time, socket, struct, threading, subprocess, re
 from queue import Queue, Empty
+from typing import Optional
 
 # --------- Tunables ----------
 DIAL_TIMEOUT = 5
@@ -40,6 +41,17 @@ def dial_tcp(host, port):
     s.connect((host, port))
     s.settimeout(None)
     return s
+
+
+def recv_exact(sock: socket.socket, n: int) -> Optional[bytes]:
+    """Receive exactly n bytes or return None if the connection closes."""
+    data = bytearray()
+    while len(data) < n:
+        chunk = sock.recv(n - len(data))
+        if not chunk:
+            return None
+        data.extend(chunk)
+    return bytes(data)
 
 def pipe(a: socket.socket, b: socket.socket):
     buf = bytearray(BUF_COPY)
@@ -111,18 +123,21 @@ def eu_mode(iran_ip, bridge_port, sync_port, pool_size):
                 time.sleep(SYNC_INTERVAL)
 
     def reverse_link_worker():
+        delay = 0.2
         while True:
             try:
                 conn = dial_tcp(iran_ip, bridge_port)
                 # wait for 2-byte target port
-                hdr = conn.recv(2)
-                if len(hdr) != 2:
+                hdr = recv_exact(conn, 2)
+                if not hdr:
                     conn.close(); continue
                 (target_port,) = struct.unpack("!H", hdr)
                 local = dial_tcp("127.0.0.1", target_port)
                 bridge(conn, local)
+                delay = 0.2
             except Exception:
-                time.sleep(0.2)
+                time.sleep(delay)
+                delay = min(delay * 2, 5.0)
 
     threading.Thread(target=port_sync_loop, daemon=True).start()
     for _ in range(pool_size):
@@ -209,13 +224,13 @@ def ir_mode(bridge_port, sync_port, pool_size, auto_sync, manual_ports_csv):
             def handle_sync(conn):
                 try:
                     while True:
-                        h = conn.recv(1)
+                        h = recv_exact(conn, 1)
                         if not h:
                             break
                         count = h[0]
                         for _ in range(count):
-                            pd = conn.recv(2)
-                            if len(pd) != 2:
+                            pd = recv_exact(conn, 2)
+                            if not pd:
                                 return
                             (p,) = struct.unpack("!H", pd)
                             open_port(p)
