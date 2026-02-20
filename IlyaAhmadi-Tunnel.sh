@@ -297,14 +297,32 @@ EOF
   chmod +x "$HC_SCRIPT"
 }
 enable_cron_healthcheck(){
-  install_healthcheck_script
-  local line="* * * * * ${HC_SCRIPT} >/dev/null 2>&1 ${HC_CRON_TAG}"
-  local tmp; tmp="$(mktemp)"
-  (crontab -l 2>/dev/null || true) | grep -vF "${HC_CRON_TAG}" >"$tmp" || true
-  echo "$line" >>"$tmp"
-  crontab "$tmp"
-  rm -f "$tmp"
-  echo "[+] Cron enabled (every 1 minute)." > /dev/tty
+
+    install_healthcheck_script
+
+    echo
+    read -rp "Enter interval in minutes (default: 1): " interval
+    interval=${interval:-1}
+
+    # Validate numeric
+    if ! [[ "$interval" =~ ^[0-9]+$ ]]; then
+        echo "[!] Invalid number. Using default 1 minute."
+        interval=1
+    fi
+
+    if [ "$interval" -lt 1 ]; then
+        interval=1
+    fi
+
+    local line="*/$interval * * * * ${HC_SCRIPT} >/dev/null 2>&1"
+    local tmp; tmp="$(mktemp)"
+
+    (crontab -l 2>/dev/null || true) | grep -vF "${HC_SCRIPT}" > "$tmp"
+    echo "$line" >> "$tmp"
+    crontab "$tmp"
+    rm -f "$tmp"
+
+    echo "[+] Cron enabled (every $interval minute(s))."
 }
 
 print_banner(){
