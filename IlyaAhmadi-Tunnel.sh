@@ -1,226 +1,169 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP="PAHLAVI"
-VERSION="v1.0.1"
-CONF="/etc/pahlavi_manager/profiles"
+APP_NAME="Pahlavi"
+TG_ID="@ilyaahmadiii"
+VERSION="1.0.0"
+
+GITHUB_REPO="github.com/Zehnovik/ilyaahmadi-tunnel"
+
+# MUST match GitHub file name exactly:
+SCRIPT_FILENAME="IlyaAhmadi-Tunnel.sh"
+SELF_URL="https://raw.githubusercontent.com/Zehnovik/ilyaahmadi-tunnel/main/${SCRIPT_FILENAME}"
+
+PY="/opt/pahlavi/ilyaahmadi.py"
+PY_URL="https://raw.githubusercontent.com/Zehnovik/ilyaahmadi-tunnel/main/ilyaahmadi.py"
+
+INSTALL_PATH="/usr/local/bin/pahlavi-tunnel"
+
+BASE="/etc/pahlavi_manager"
+CONF="$BASE/profiles"
 MAX=10
 
-PY="/usr/local/bin/ilyaahmadi.py"   # مسیر فایل پایتون تونل
-SCREEN_BIN="$(command -v screen || true)"
-PY_BIN="$(command -v python3 || true)"
+HC_SCRIPT="/usr/local/bin/pahlavi-health-check"
+HC_CRON_TAG="# PahlaviTunnelHealthCheck"
 
-CLR_RESET=$'\033[0m'
-CLR_GREEN=$'\033[32;1m'
-CLR_RED=$'\033[31;1m'
-CLR_CYAN=$'\033[36;1m'
-CLR_GRAY=$'\033[90;1m'
-CLR_BOLD=$'\033[1m'
+# Colors
+if [[ -t 1 ]]; then
+  CLR_RESET="\033[0m"; CLR_DIM="\033[2m"; CLR_BOLD="\033[1m"
+  CLR_RED="\033[31m"; CLR_GREEN="\033[32m"; CLR_YELLOW="\033[33m"
+  CLR_CYAN="\033[36m"; CLR_WHITE="\033[97m"
+else
+  CLR_RESET=""; CLR_DIM=""; CLR_BOLD=""
+  CLR_RED=""; CLR_GREEN=""; CLR_YELLOW=""
+  CLR_CYAN=""; CLR_WHITE=""
+fi
 
-die(){ echo "${CLR_RED}[-]${CLR_RESET} $*" > /dev/tty; exit 1; }
-ok(){ echo "${CLR_GREEN}[+]${CLR_RESET} $*" > /dev/tty; }
-info(){ echo "${CLR_CYAN}[*]${CLR_RESET} $*" > /dev/tty; }
+need_root(){ [[ "$(id -u)" == "0" ]] || { echo "Run as root (sudo -i)"; exit 1; }; }
+pause(){ read -r -p "Press Enter to continue..." _ < /dev/tty || true; }
+have(){ command -v "$1" >/dev/null 2>&1; }
 
-need_bins(){
-  [[ -n "$SCREEN_BIN" ]] || die "screen not found. Install: apt install -y screen"
-  [[ -n "$PY_BIN" ]] || die "python3 not found. Install: apt install -y python3"
-  [[ -f "$PY" ]] || die "Tunnel python not found at: $PY  (copy it there)"
+apt_try_install(){
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -y >/dev/null 2>&1 || true
+  apt-get install -y "$@" >/dev/null 2>&1 || true
 }
 
-mkdir -p "$CONF"
-
-get_public_ip(){
-  (curl -fsS --max-time 3 https://api.ipify.org 2>/dev/null || true)
-}
-
-header(){
-  clear || true
-  echo "${CLR_BOLD}${APP}${CLR_RESET}  ${CLR_GRAY}${VERSION}${CLR_RESET}"
-  echo "${CLR_GRAY}----------------------------------------------${CLR_RESET}"
-  local ip; ip="$(get_public_ip)"
-  echo "Public IP: ${CLR_CYAN}${ip:-Unknown}${CLR_RESET}"
-  echo "Roles: ${CLR_GREEN}IRAN = Server${CLR_RESET}  |  ${CLR_GREEN}EU = Client${CLR_RESET}"
-  echo "${CLR_GRAY}----------------------------------------------${CLR_RESET}"
-}
-
-pause(){ read -r -p "Press Enter to continue..." _ < /dev/tty; }
-
-session_name(){ echo "pahlavi_${1}"; }
-
-is_running(){
-  local prof="$1" s; s="$(session_name "$prof")"
-  screen -ls 2>/dev/null | grep -qE "[[:space:]]+[0-9]+\.$s[[:space:]]"
-}
-
-require_var(){
-  local name="$1" val="${2:-}"
-  [[ -n "$val" ]] || die "Profile error: missing/empty ${name}"
-}
-
-show_profile(){
-  local prof="$1" f="$CONF/${prof}.env"
-  [[ -f "$f" ]] || die "Profile not found: $prof"
-  echo "${CLR_GRAY}--- ${f} ---${CLR_RESET}" > /dev/tty
-  cat "$f" > /dev/tty
-}
-
-edit_profile(){
-  local prof="$1" f="$CONF/${prof}.env" role="${prof%%[0-9]*}"
-  echo "" > /dev/tty
-  info "Editing: ${CLR_BOLD}${prof}${CLR_RESET}"
-
-  if [[ "$role" == "eu" ]]; then
-    echo "${CLR_GRAY}EU role = Client (connects to IRAN server)${CLR_RESET}" > /dev/tty
-    read -r -p "IRAN Server IP: " IRAN_IP < /dev/tty
-    read -r -p "Bridge port (e.g. 8000): " BRIDGE < /dev/tty
-    read -r -p "Sync port   (e.g. 8001): " SYNC < /dev/tty
-
-    : "${IRAN_IP:=}"
-    : "${BRIDGE:=}"
-    : "${SYNC:=}"
-
-    [[ "$BRIDGE" =~ ^[0-9]+$ ]] || die "BRIDGE must be a number"
-    [[ "$SYNC"   =~ ^[0-9]+$ ]] || die "SYNC must be a number"
-
-    cat >"$f" <<EOF
-ROLE=eu
-IRAN_IP=${IRAN_IP}
-BRIDGE=${BRIDGE}
-SYNC=${SYNC}
-EOF
-
+fetch_url_to(){
+  local url="$1" out="$2"
+  if have curl; then
+    curl -fsSL "$url" -o "$out"
   else
-    echo "${CLR_GRAY}IRAN role = Server (listens)${CLR_RESET}" > /dev/tty
-    read -r -p "Bridge port (e.g. 8000): " BRIDGE < /dev/tty
-    read -r -p "Sync port   (e.g. 8001): " SYNC < /dev/tty
-    read -r -p "Auto-Sync ports from EU? (y/n): " AS < /dev/tty
-
-    : "${BRIDGE:=}"
-    : "${SYNC:=}"
-    : "${AS:=n}"
-
-    [[ "$BRIDGE" =~ ^[0-9]+$ ]] || die "BRIDGE must be a number"
-    [[ "$SYNC"   =~ ^[0-9]+$ ]] || die "SYNC must be a number"
-
-    if [[ "${AS,,}" == "y" ]]; then
-      cat >"$f" <<EOF
-ROLE=iran
-BRIDGE=${BRIDGE}
-SYNC=${SYNC}
-AUTO_SYNC=true
-PORTS=
-EOF
-    else
-      read -r -p "Manual ports CSV (e.g. 80,443,2083): " PORTS < /dev/tty
-      : "${PORTS:=}"
-      cat >"$f" <<EOF
-ROLE=iran
-BRIDGE=${BRIDGE}
-SYNC=${SYNC}
-AUTO_SYNC=false
-PORTS=${PORTS}
-EOF
-    fi
-  fi
-
-  ok "Saved: $f"
-}
-
-run_slot(){
-  local prof="$1" f="$CONF/${prof}.env"
-  [[ -f "$f" ]] || die "Profile not found: $prof"
-
-  # امن برای set -u
-  set +u
-  # shellcheck disable=SC1090
-  source "$f"
-  set -u
-
-  local role="${ROLE:-}"
-  require_var "ROLE" "$role"
-
-  local s; s="$(session_name "$prof")"
-  screen -S "$s" -X quit >/dev/null 2>&1 || true
-
-  if [[ "$role" == "eu" ]]; then
-    # EU Client
-    require_var "IRAN_IP" "${IRAN_IP:-}"
-    require_var "BRIDGE"  "${BRIDGE:-}"
-    require_var "SYNC"    "${SYNC:-}"
-
-    local input
-    input="$(printf "1\n%s\n%s\n%s\n" "${IRAN_IP}" "${BRIDGE}" "${SYNC}")"
-    screen -dmS "$s" bash -lc "python3 '$PY' <<'__IN__'
-${input}
-__IN__"
-    ok "Started: $s (EU Client)"
-
-  elif [[ "$role" == "iran" ]]; then
-    # IRAN Server
-    require_var "BRIDGE" "${BRIDGE:-}"
-    require_var "SYNC"   "${SYNC:-}"
-
-    local auto="${AUTO_SYNC:-true}"
-    local input
-
-    if [[ "${auto}" == "true" ]]; then
-      input="$(printf "2\n%s\n%s\ny\n" "${BRIDGE}" "${SYNC}")"
-    else
-      input="$(printf "2\n%s\n%s\nn\n%s\n" "${BRIDGE}" "${SYNC}" "${PORTS:-}")"
-    fi
-
-    screen -dmS "$s" bash -lc "python3 '$PY' <<'__IN__'
-${input}
-__IN__"
-    ok "Started: $s (IRAN Server)"
-
-  else
-    die "Invalid ROLE in profile: ${role}"
+    have wget || apt_try_install wget
+    wget -qO "$out" "$url"
   fi
 }
 
-stop_slot(){
-  local prof="$1" s; s="$(session_name "$prof")"
-  screen -S "$s" -X quit >/dev/null 2>&1 || true
-  ok "Stopped: $s"
+is_installed(){ [[ -x "$INSTALL_PATH" ]]; }
+
+ensure(){
+  mkdir -p "$CONF"
+  mkdir -p "$(dirname "$PY")"
+  have screen  || apt_try_install screen
+  have python3 || apt_try_install python3
+  have curl    || apt_try_install curl
+  have figlet  || apt_try_install figlet
+
+  if [[ ! -f "$PY" ]]; then
+    echo "[*] Python core not found. Downloading: $PY_URL" > /dev/tty
+    fetch_url_to "$PY_URL" "$PY"
+    chmod +x "$PY" || true
+  fi
+  [[ -f "$PY" ]] || { echo "Missing python file: $PY"; exit 1; }
 }
 
-status_slot(){
-  local prof="$1"
-  local st="${CLR_RED}OFF${CLR_RESET}"
-  if is_running "$prof"; then st="${CLR_GREEN}ON${CLR_RESET}"; fi
-  echo -e "Profile: $prof | Running: $st" > /dev/tty
+install_script(){
+  echo "[*] Installing to: $INSTALL_PATH" > /dev/tty
+  mkdir -p "$(dirname "$INSTALL_PATH")"
+
+  # If executed from a file path, copy it. Otherwise download from SELF_URL.
+  if [[ -f "$0" ]] && [[ "$0" != "bash" ]] && [[ "$0" != "/dev/fd/"* ]]; then
+    cp -f "$0" "$INSTALL_PATH"
+  else
+    fetch_url_to "$SELF_URL" "$INSTALL_PATH"
+  fi
+  chmod +x "$INSTALL_PATH"
+  echo "[+] Installed. Run: sudo pahlavi-tunnel" > /dev/tty
 }
 
-logs_slot(){
-  local prof="$1" s; s="$(session_name "$prof")"
-  info "Attach: $s (Ctrl+A then D)"
-  screen -r "$s" || true
+update_script(){
+  echo "[*] Updating from: $SELF_URL" > /dev/tty
+  local tmp; tmp="$(mktemp)"
+  fetch_url_to "$SELF_URL" "$tmp"
+
+  if ! head -n 1 "$tmp" | grep -q "bash"; then
+    echo "[-] Update failed: invalid file downloaded." > /dev/tty
+    rm -f "$tmp"
+    return 1
+  fi
+  chmod +x "$tmp"
+
+  if is_installed; then
+    mv -f "$tmp" "$INSTALL_PATH"
+    chmod +x "$INSTALL_PATH"
+    echo "[+] Updated. Run again: sudo pahlavi-tunnel" > /dev/tty
+  else
+    mv -f "$tmp" "./${SCRIPT_FILENAME}"
+    chmod +x "./${SCRIPT_FILENAME}"
+    echo "[+] Updated file saved locally: ./${SCRIPT_FILENAME}" > /dev/tty
+  fi
 }
 
-delete_slot(){
-  local prof="$1" f="$CONF/${prof}.env"
-  stop_slot "$prof" >/dev/null 2>&1 || true
-  rm -f "$f" || true
-  ok "Deleted: $f"
+disable_cron_healthcheck(){
+  local tmp; tmp="$(mktemp)"
+  (crontab -l 2>/dev/null || true) | grep -vF "${HC_CRON_TAG}" >"$tmp" || true
+  crontab "$tmp" || true
+  rm -f "$tmp"
+  echo "[+] Cron disabled." > /dev/tty
 }
 
+uninstall_script(){
+  disable_cron_healthcheck >/dev/null 2>&1 || true
+  rm -f "$HC_SCRIPT" >/dev/null 2>&1 || true
+  rm -f "$INSTALL_PATH" >/dev/null 2>&1 || true
+  echo "[+] Uninstalled: $INSTALL_PATH" > /dev/tty
+}
+
+# Info (best-effort)
+get_public_ip(){ curl -fsSL --max-time 3 https://api.ipify.org 2>/dev/null || true; }
+get_ipinfo_field(){
+  local field="$1" ip="$2"
+  [[ -n "$ip" ]] || { echo ""; return 0; }
+  local json
+  json="$(curl -fsSL --max-time 4 "https://ipinfo.io/${ip}/json" 2>/dev/null || true)"
+  [[ -n "$json" ]] || { echo ""; return 0; }
+  echo "$json" | tr -d '\n' | sed -n "s/.*\"${field}\":[ ]*\"\\([^\"]*\\)\".*/\\1/p" | head -n1
+}
+get_location_string(){
+  local ip city region country
+  ip="$(get_public_ip)"
+  city="$(get_ipinfo_field city "$ip")"
+  region="$(get_ipinfo_field region "$ip")"
+  country="$(get_ipinfo_field country "$ip")"
+  if [[ -n "$city" || -n "$region" || -n "$country" ]]; then
+    echo "${city}${city:+, }${region}${region:+, }${country}"
+  else
+    echo "Unknown"
+  fi
+}
+get_datacenter_string(){
+  local ip org
+  ip="$(get_public_ip)"
+  org="$(get_ipinfo_field org "$ip")"
+  [[ -n "$org" ]] && echo "$org" || echo "Unknown"
+}
+
+# Profiles
 pick_role(){
   while true; do
-    echo "1) EU (Client)" > /dev/tty
-    echo "2) IRAN (Server)" > /dev/tty
+    printf "1) EU\n2) IRAN\n" > /dev/tty
     read -r -p "Select: " x < /dev/tty
-    [[ "$x" == "1" ]] && { echo "eu"; return; }
-    [[ "$x" == "2" ]] && { echo "iran"; return; }
+    if [[ "$x" == "1" ]]; then echo "eu"; return 0; fi
+    if [[ "$x" == "2" ]]; then echo "iran"; return 0; fi
     echo "Invalid." > /dev/tty
   done
 }
-
-slot_status(){
-  local role="$1" i="$2"
-  [[ -f "$CONF/${role}${i}.env" ]] && echo "[saved]" || echo "(empty)"
-}
-
+slot_status(){ local role="$1" i="$2"; [[ -f "$CONF/${role}${i}.env" ]] && echo "[saved]" || echo "(empty)"; }
 pick_slot(){
   local role="$1"
   echo "" > /dev/tty
@@ -231,29 +174,181 @@ pick_slot(){
   done
   echo "--------------------------------" > /dev/tty
   read -r -p "Slot number: " slot < /dev/tty
-  [[ "$slot" =~ ^[0-9]+$ ]] && [[ "$slot" -ge 1 ]] && [[ "$slot" -le "$MAX" ]] || die "Invalid slot"
+  [[ "$slot" =~ ^[0-9]+$ ]] && [[ "$slot" -ge 1 ]] && [[ "$slot" -le "$MAX" ]] || { echo "Invalid"; exit 1; }
   echo "${role}${slot}"
 }
+edit_profile(){
+  local prof="$1" f="$CONF/${prof}.env" role="${prof%%[0-9]*}"
+  echo "" > /dev/tty; echo "Editing: $prof" > /dev/tty
 
-manage_menu(){
+  if [[ "$role" == "eu" ]]; then
+    read -r -p "Iran IP: " IRAN_IP < /dev/tty
+    read -r -p "Bridge port (e.g. 7000): " BRIDGE < /dev/tty
+    read -r -p "Sync port   (e.g. 7001): " SYNC < /dev/tty
+    cat >"$f" <<EOF
+ROLE=eu
+IRAN_IP=$IRAN_IP
+BRIDGE=$BRIDGE
+SYNC=$SYNC
+EOF
+  else
+    read -r -p "Bridge port (e.g. 7000): " BRIDGE < /dev/tty
+    read -r -p "Sync port   (e.g. 7001): " SYNC < /dev/tty
+    read -r -p "Auto-Sync ports from EU? (y/n): " AS < /dev/tty
+    if [[ "${AS,,}" == "y" ]]; then
+      cat >"$f" <<EOF
+ROLE=iran
+BRIDGE=$BRIDGE
+SYNC=$SYNC
+AUTO_SYNC=true
+PORTS=
+EOF
+    else
+      read -r -p "Manual ports CSV (e.g. 80,443,2083): " PORTS < /dev/tty
+      cat >"$f" <<EOF
+ROLE=iran
+BRIDGE=$BRIDGE
+SYNC=$SYNC
+AUTO_SYNC=false
+PORTS=$PORTS
+EOF
+    fi
+  fi
+  echo "[+] Saved $f" > /dev/tty
+}
+
+session_name(){ echo "pahlavi_$1"; }
+is_running(){
+  local prof="$1" s; s="$(session_name "$prof")"
+  screen -ls 2>/dev/null | grep -q "\.${s}[[:space:]]"
+}
+run_slot(){
+  local prof="$1" f="$CONF/${prof}.env"
+  [[ -f "$f" ]] || { echo "Profile not found: $prof" > /dev/tty; return 1; }
+  # shellcheck disable=SC1090
+  source "$f"
+  local s; s="$(session_name "$prof")"
+  screen -S "$s" -X quit >/dev/null 2>&1 || true
+
+  if [[ "$ROLE" == "eu" ]]; then
+    screen -dmS "$s" bash -lc "printf '1\n%s\n%s\n%s\n' '$IRAN_IP' '$BRIDGE' '$SYNC' | python3 '$PY'"
+  else
+    if [[ "${AUTO_SYNC:-true}" == "true" ]]; then
+      screen -dmS "$s" bash -lc "printf '2\n%s\n%s\ny\n' '$BRIDGE' '$SYNC' | python3 '$PY'"
+    else
+      screen -dmS "$s" bash -lc "printf '2\n%s\n%s\nn\n%s\n' '$BRIDGE' '$SYNC' '${PORTS:-}' | python3 '$PY'"
+    fi
+  fi
+  echo "[+] Started: $s" > /dev/tty
+}
+stop_slot(){ local prof="$1" s; s="$(session_name "$prof")"; screen -S "$s" -X quit >/dev/null 2>&1 || true; echo "[+] Stopped: $s" > /dev/tty; }
+restart_slot(){ local prof="$1"; stop_slot "$prof" >/dev/null 2>&1 || true; sleep 0.5; run_slot "$prof"; }
+status_slot(){
+  local prof="$1" f="$CONF/${prof}.env"
+  [[ -f "$f" ]] || { echo "Profile not found: $prof" > /dev/tty; return 1; }
+  local st="${CLR_RED}OFF${CLR_RESET}"
+  if is_running "$prof"; then st="${CLR_GREEN}ON${CLR_RESET}"; fi
+  echo -e "Profile: $prof | Running: $st" > /dev/tty
+}
+delete_slot(){
+  local prof="$1" f="$CONF/${prof}.env"
+  stop_slot "$prof" >/dev/null 2>&1 || true
+  if [[ -f "$f" ]]; then rm -f "$f"; echo "[+] Deleted: $f" > /dev/tty; else echo "[-] Not found: $f" > /dev/tty; fi
+}
+logs_slot(){ local prof="$1" s; s="$(session_name "$prof")"; echo "[i] Attach: $s (Ctrl+A then D)" > /dev/tty; screen -r "$s" || true; }
+
+install_healthcheck_script(){
+  cat >"$HC_SCRIPT" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+PY="${PY}"
+CONF="${CONF}"
+MAX="${MAX}"
+session_name(){ echo "pahlavi_\$1"; }
+is_running(){ local prof="\$1" s; s="\$(session_name "\$prof")"; screen -ls 2>/dev/null | grep -q "\\.\${s}[[:space:]]"; }
+start_from_profile(){
+  local prof="\$1" f="\${CONF}/\${prof}.env"
+  [[ -f "\$f" ]] || return 0
+  # shellcheck disable=SC1090
+  source "\$f"
+  local s; s="\$(session_name "\$prof")"
+  screen -S "\$s" -X quit >/dev/null 2>&1 || true
+  if [[ "\${ROLE}" == "eu" ]]; then
+    screen -dmS "\$s" bash -lc "printf '1\\n%s\\n%s\\n%s\\n' '\${IRAN_IP}' '\${BRIDGE}' '\${SYNC}' | python3 '\${PY}'"
+  else
+    if [[ "\${AUTO_SYNC:-true}" == "true" ]]; then
+      screen -dmS "\$s" bash -lc "printf '2\\n%s\\n%s\\ny\\n' '\${BRIDGE}' '\${SYNC}' | python3 '\${PY}'"
+    else
+      screen -dmS "\$s" bash -lc "printf '2\\n%s\\n%s\\nn\\n%s\\n' '\${BRIDGE}' '\${SYNC}' '\${PORTS:-}' | python3 '\${PY}'"
+    fi
+  fi
+}
+[[ -f "\$PY" ]] || exit 0
+for role in eu iran; do
+  for i in \$(seq 1 "\$MAX"); do
+    prof="\${role}\${i}"
+    [[ -f "\${CONF}/\${prof}.env" ]] || continue
+    if ! is_running "\$prof"; then start_from_profile "\$prof" >/dev/null 2>&1 || true; fi
+  done
+done
+EOF
+  chmod +x "$HC_SCRIPT"
+}
+enable_cron_healthcheck(){
+  install_healthcheck_script
+  local line="* * * * * ${HC_SCRIPT} >/dev/null 2>&1 ${HC_CRON_TAG}"
+  local tmp; tmp="$(mktemp)"
+  (crontab -l 2>/dev/null || true) | grep -vF "${HC_CRON_TAG}" >"$tmp" || true
+  echo "$line" >>"$tmp"
+  crontab "$tmp"
+  rm -f "$tmp"
+  echo "[+] Cron enabled (every 1 minute)." > /dev/tty
+}
+
+print_banner(){
+  local loc dc inst
+  loc="$(get_location_string)"
+  dc="$(get_datacenter_string)"
+  inst="${CLR_RED}NOT INSTALLED${CLR_RESET}"
+  if is_installed; then inst="${CLR_GREEN}INSTALLED${CLR_RESET}"; fi
+
+  echo -e "${CLR_CYAN}${CLR_BOLD}"
+  if have figlet; then
+    figlet -f slant "$APP_NAME" 2>/dev/null || figlet "$APP_NAME" 2>/dev/null || true
+  else
+    echo "$APP_NAME"
+  fi
+  echo -e "${CLR_RESET}"
+
+  echo -e "${CLR_GREEN}Version:${CLR_RESET} v${VERSION}"
+  echo -e "${CLR_GREEN}GitHub:${CLR_RESET} ${GITHUB_REPO}"
+  echo -e "${CLR_GREEN}Telegram ID:${CLR_RESET} ${TG_ID}"
+  echo -e "${CLR_DIM}============================================================${CLR_RESET}"
+  echo -e "${CLR_CYAN}Location:${CLR_RESET} ${loc}"
+  echo -e "${CLR_CYAN}Datacenter:${CLR_RESET} ${dc}"
+  echo -e "${CLR_CYAN}Script:${CLR_RESET} ${inst}"
+  echo -e "${CLR_DIM}============================================================${CLR_RESET}"
+}
+
+manage_slot_menu(){
   local prof="$1"
   while true; do
     echo "" > /dev/tty
-    echo "Manage: ${CLR_BOLD}${prof}${CLR_RESET}" > /dev/tty
+    echo -e "${CLR_YELLOW}${CLR_BOLD}Manage slot:${CLR_RESET} ${prof}" > /dev/tty
     echo "1) Show profile" > /dev/tty
     echo "2) Start" > /dev/tty
     echo "3) Stop" > /dev/tty
     echo "4) Restart" > /dev/tty
     echo "5) Status" > /dev/tty
     echo "6) Logs" > /dev/tty
-    echo "7) Delete profile" > /dev/tty
+    echo "7) Delete slot" > /dev/tty
     echo "0) Back" > /dev/tty
-    read -r -p "Select: " x < /dev/tty
-    case "$x" in
-      1) show_profile "$prof"; pause ;;
+    read -r -p "Select: " c < /dev/tty
+    case "$c" in
+      1) cat "$CONF/${prof}.env" 2>/dev/null > /dev/tty || echo "Profile not found." > /dev/tty; pause ;;
       2) run_slot "$prof"; pause ;;
       3) stop_slot "$prof"; pause ;;
-      4) stop_slot "$prof" >/dev/null 2>&1 || true; sleep 0.3; run_slot "$prof"; pause ;;
+      4) restart_slot "$prof"; pause ;;
       5) status_slot "$prof"; pause ;;
       6) logs_slot "$prof" ;;
       7) delete_slot "$prof"; pause ;;
@@ -263,43 +358,34 @@ manage_menu(){
   done
 }
 
-main_menu(){
-  need_bins
-  while true; do
-    header
-    echo "1) Create/Update profile" > /dev/tty
-    echo "2) Manage tunnel (select slot)" > /dev/tty
-    echo "3) Status (all saved profiles)" > /dev/tty
-    echo "0) Exit" > /dev/tty
-    echo "${CLR_GRAY}----------------------------------------------${CLR_RESET}" > /dev/tty
-    read -r -p "Select: " x < /dev/tty
-    case "$x" in
-      1)
-        role="$(pick_role)"
-        prof="$(pick_slot "$role")"
-        edit_profile "$prof"
-        pause
-      ;;
-      2)
-        role="$(pick_role)"
-        prof="$(pick_slot "$role")"
-        manage_menu "$prof"
-      ;;
-      3)
-        echo "" > /dev/tty
-        for role in eu iran; do
-          for i in $(seq 1 "$MAX"); do
-            prof="${role}${i}"
-            [[ -f "$CONF/${prof}.env" ]] || continue
-            status_slot "$prof"
-          done
-        done
-        pause
-      ;;
-      0) exit 0 ;;
-      *) echo "Invalid." > /dev/tty; sleep 0.4 ;;
-    esac
-  done
-}
+# ===================== Main =====================
+need_root
+ensure
 
-main_menu
+while true; do
+  clear || true
+  print_banner
+
+  echo -e "${CLR_WHITE}${CLR_BOLD}1.${CLR_RESET} Create/Update profile"
+  echo -e "${CLR_WHITE}${CLR_BOLD}2.${CLR_RESET} Manage tunnel (select slot)"
+  echo -e "${CLR_WHITE}${CLR_BOLD}3.${CLR_RESET} Enable cron health-check"
+  echo -e "${CLR_WHITE}${CLR_BOLD}4.${CLR_RESET} Disable cron health-check"
+  echo -e "${CLR_WHITE}${CLR_BOLD}5.${CLR_RESET} Install script (system-wide)"
+  echo -e "${CLR_WHITE}${CLR_BOLD}6.${CLR_RESET} Update script (self-update)"
+  echo -e "${CLR_WHITE}${CLR_BOLD}7.${CLR_RESET} Uninstall script"
+  echo -e "${CLR_WHITE}${CLR_BOLD}0.${CLR_RESET} Exit"
+  echo -e "${CLR_DIM}------------------------------------------------------------${CLR_RESET}"
+
+  read -r -p "Select: " c < /dev/tty
+  case "$c" in
+    1) role="$(pick_role)"; prof="$(pick_slot "$role")"; edit_profile "$prof"; pause ;;
+    2) role="$(pick_role)"; prof="$(pick_slot "$role")"; manage_slot_menu "$prof" ;;
+    3) enable_cron_healthcheck; pause ;;
+    4) disable_cron_healthcheck; pause ;;
+    5) install_script; pause ;;
+    6) update_script; pause ;;
+    7) uninstall_script; pause ;;
+    0) exit 0 ;;
+    *) echo "Invalid."; sleep 1 ;;
+  esac
+done
