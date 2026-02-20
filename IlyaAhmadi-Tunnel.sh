@@ -183,7 +183,6 @@ edit_profile(){
 
   if [[ "$role" == "eu" ]]; then
     read -r -p "Iran IP: " IRAN_IP < /dev/tty
-    read -r -p "EU/Foreign IP (optional; reserved IP): " EU_IP < /dev/tty
     read -r -p "Bridge port (e.g. 7000): " BRIDGE < /dev/tty
     read -r -p "Sync port   (e.g. 7001): " SYNC < /dev/tty
     cat >"$f" <<EOF
@@ -193,6 +192,8 @@ BRIDGE=$BRIDGE
 SYNC=$SYNC
 EOF
   else
+    # Optional allow-list IP for EU (useful when main EU IP is filtered but a reserved IP is used)
+    read -r -p "EU/Foreign IP (optional; reserved IP): " EU_IP < /dev/tty
     read -r -p "Bridge port (e.g. 7000): " BRIDGE < /dev/tty
     read -r -p "Sync port   (e.g. 7001): " SYNC < /dev/tty
     read -r -p "Auto-Sync ports from EU? (y/n): " AS < /dev/tty
@@ -230,6 +231,7 @@ run_slot(){
   [[ -f "$f" ]] || { echo "Profile not found: $prof" > /dev/tty; return 1; }
   # shellcheck disable=SC1090
   source "$f"
+  EU_IP="${EU_IP:-}"
   local s; s="$(session_name "$prof")"
   screen -S "$s" -X quit >/dev/null 2>&1 || true
 
@@ -280,9 +282,9 @@ start_from_profile(){
     screen -dmS "\$s" bash -lc "printf '1\\n%s\\n%s\\n%s\\n' '\${IRAN_IP}' '\${BRIDGE}' '\${SYNC}' | python3 '\${PY}'"
   else
     if [[ "\${AUTO_SYNC:-true}" == "true" ]]; then
-      screen -dmS "\$s" bash -lc "printf '2\\n%s\\n%s\\ny\\n' '\${BRIDGE}' '\${SYNC}' | python3 '\${PY}'"
+      screen -dmS "\$s" bash -lc "printf '2\\n%s\\n%s\\n%s\\ny\\n' '\${EU_IP:-}' '\${BRIDGE}' '\${SYNC}' | python3 '\${PY}'"
     else
-      screen -dmS "\$s" bash -lc "printf '2\\n%s\\n%s\\nn\\n%s\\n' '\${BRIDGE}' '\${SYNC}' '\${PORTS:-}' | python3 '\${PY}'"
+      screen -dmS "\$s" bash -lc "printf '2\\n%s\\n%s\\n%s\\nn\\n%s\\n' '\${EU_IP:-}' '\${BRIDGE}' '\${SYNC}' '\${PORTS:-}' | python3 '\${PY}'"
     fi
   fi
 }
