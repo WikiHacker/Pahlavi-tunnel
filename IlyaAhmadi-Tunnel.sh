@@ -63,6 +63,8 @@ ensure(){
   have python3 || apt_try_install python3
   have curl    || apt_try_install curl
   have figlet  || apt_try_install figlet
+  have ss      || apt_try_install iproute2
+  have crontab || apt_try_install cron
 
   if [[ ! -f "$PY" ]]; then
     echo "[*] Python core not found. Downloading: $PY_URL" > /dev/tty
