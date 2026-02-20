@@ -133,7 +133,7 @@ def eu_mode(iran_ip, bridge_port, sync_port, pool_size):
         time.sleep(3600)
 
 # --------- IR mode ----------
-def ir_mode(bridge_port, sync_port, pool_size, auto_sync, manual_ports_csv, allowed_eu_ip=""):
+def ir_mode(bridge_port, sync_port, pool_size, auto_sync, manual_ports_csv):
     pool = Queue(maxsize=pool_size * 2)
     active = {}
     active_lock = threading.Lock()
@@ -146,11 +146,6 @@ def ir_mode(bridge_port, sync_port, pool_size, auto_sync, manual_ports_csv, allo
         print(f"[IR] Bridge listening on {bridge_port}")
         while True:
             c, _ = srv.accept()
-            peer_ip = _[0]
-            if allowed_eu_ip and peer_ip != allowed_eu_ip:
-                try: c.close()
-                except Exception: pass
-                continue
             tune_tcp(c)
             try:
                 pool.put(c, block=False)
@@ -211,11 +206,6 @@ def ir_mode(bridge_port, sync_port, pool_size, auto_sync, manual_ports_csv, allo
         print(f"[IR] Sync listening on {sync_port} (AutoSync)")
         while True:
             c, _ = srv.accept()
-            peer_ip = _[0]
-            if allowed_eu_ip and peer_ip != allowed_eu_ip:
-                try: c.close()
-                except Exception: pass
-                continue
             def handle_sync(conn):
                 try:
                     while True:
@@ -273,36 +263,26 @@ def read_line(prompt=None):
 def main():
     # expected input order (from your shell wrapper):
     # EU: 1, IRAN_IP, BRIDGE, SYNC
-    # IR: 2, [EU_IP optional], BRIDGE, SYNC, y|n, [PORTS if n]
-    choice = (read_line() or "").strip()
-    if choice not in ("1", "2"):
+    # IR: 2, BRIDGE, SYNC, y|n, [PORTS if n]
+    choice = read_line()
+    if choice not in ("1","2"):
         print("Invalid mode selection.")
         sys.exit(1)
 
     if choice == "1":
-        iran_ip = (read_line() or "").strip()
-        bridge = int((read_line() or "7000").strip())
-        sync = int((read_line() or "7001").strip())
+        iran_ip = read_line()
+        bridge = int(read_line() or "7000")
+        sync = int(read_line() or "7001")
         eu_mode(iran_ip, bridge, sync, pool_size=800)
-        return
-
-    # IR mode
-    first = (read_line() or "").strip()
-    allowed_eu_ip = ""
-    # Backward compatible: older wrappers send BRIDGE immediately (digits)
-    if re.fullmatch(r"\d{1,5}", first or ""):
-        bridge = int(first)
     else:
-        allowed_eu_ip = first
-        bridge = int((read_line() or "7000").strip())
-
-    sync = int((read_line() or "7001").strip())
-    yn = (read_line() or "y").strip().lower()
-    if yn == "y":
-        ir_mode(bridge, sync, pool_size=800, auto_sync=True, manual_ports_csv="", allowed_eu_ip=allowed_eu_ip)
-    else:
-        ports = (read_line() or "").strip()
-        ir_mode(bridge, sync, pool_size=800, auto_sync=False, manual_ports_csv=ports, allowed_eu_ip=allowed_eu_ip)
+        bridge = int(read_line() or "7000")
+        sync = int(read_line() or "7001")
+        yn = (read_line() or "y").lower()
+        if yn == "y":
+            ir_mode(bridge, sync, pool_size=800, auto_sync=True, manual_ports_csv="")
+        else:
+            ports = read_line()
+            ir_mode(bridge, sync, pool_size=800, auto_sync=False, manual_ports_csv=ports)
 
 if __name__ == "__main__":
     main()
