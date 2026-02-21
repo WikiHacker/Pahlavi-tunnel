@@ -1,4 +1,4 @@
-🇮🇷 فارسی | 🌍 [English Version](README.md)
+🌍 English | 🇮🇷 [نسخه فارسی](README_FA.md)
 
 # 🚀 Pahlavi Tunnel
 
