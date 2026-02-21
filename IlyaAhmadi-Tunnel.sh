@@ -119,6 +119,54 @@ disable_cron_healthcheck(){
   echo "[+] Cron disabled." > /dev/tty
 }
 
+optimize_server(){
+  echo "" > /dev/tty
+  echo "[*] Optimizing network settings and enabling BBR if supported..." > /dev/tty
+
+  # Ensure tools that are commonly missing on minimal images
+  have sysctl  || apt_try_install procps
+  have modprobe || apt_try_install kmod
+  have ss || apt_try_install iproute2
+
+  # Cron is optional but health-check uses crontab
+  have crontab || apt_try_install cron
+
+  # Try loading BBR module (no hard fail)
+  modprobe tcp_bbr >/dev/null 2>&1 || true
+
+  if sysctl net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -q bbr; then
+    echo "[+] BBR is available." > /dev/tty
+
+    # Apply runtime settings
+    sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1 || true
+    sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1 || true
+
+    # Persist settings (idempotent, separate file)
+    local conf="/etc/sysctl.d/99-pahlavi-tunnel.conf"
+    cat > "$conf" <<'EOF'
+# Pahlavi Tunnel - network tuning
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+
+# Socket buffer ceilings (reasonable defaults)
+net.core.rmem_max=16777216
+net.core.wmem_max=16777216
+net.ipv4.tcp_rmem=4096 87380 16777216
+net.ipv4.tcp_wmem=4096 65536 16777216
+EOF
+
+    sysctl --system >/dev/null 2>&1 || sysctl -p >/dev/null 2>&1 || true
+
+    echo "[+] Applied sysctl tuning." > /dev/tty
+    echo "[i] tcp_congestion_control: $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)" > /dev/tty
+    echo "[i] default_qdisc:         $(sysctl -n net.core.default_qdisc 2>/dev/null)" > /dev/tty
+  else
+    echo "[!] BBR is NOT available on this kernel." > /dev/tty
+    echo "[i] Available: $(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || echo unknown)" > /dev/tty
+    echo "[i] Hint: upgrade kernel to use BBR." > /dev/tty
+  fi
+}
+
 uninstall_script(){
   disable_cron_healthcheck >/dev/null 2>&1 || true
   rm -f "$HC_SCRIPT" >/dev/null 2>&1 || true
@@ -297,32 +345,25 @@ EOF
   chmod +x "$HC_SCRIPT"
 }
 enable_cron_healthcheck(){
+  install_healthcheck_script
 
-    install_healthcheck_script
+  echo "" > /dev/tty
+  read -r -p "Enter interval in minutes (default: 1): " interval < /dev/tty || true
+  interval=${interval:-1}
 
-    echo
-    read -rp "Enter interval in minutes (default: 1): " interval
-    interval=${interval:-1}
+  if ! [[ "$interval" =~ ^[0-9]+$ ]]; then
+    echo "[!] Invalid number. Using default 1 minute." > /dev/tty
+    interval=1
+  fi
+  if [ "$interval" -lt 1 ]; then interval=1; fi
 
-    # Validate numeric
-    if ! [[ "$interval" =~ ^[0-9]+$ ]]; then
-        echo "[!] Invalid number. Using default 1 minute."
-        interval=1
-    fi
-
-    if [ "$interval" -lt 1 ]; then
-        interval=1
-    fi
-
-    local line="*/$interval * * * * ${HC_SCRIPT} >/dev/null 2>&1"
-    local tmp; tmp="$(mktemp)"
-
-    (crontab -l 2>/dev/null || true) | grep -vF "${HC_SCRIPT}" > "$tmp"
-    echo "$line" >> "$tmp"
-    crontab "$tmp"
-    rm -f "$tmp"
-
-    echo "[+] Cron enabled (every $interval minute(s))."
+  local line="*/$interval * * * * ${HC_SCRIPT} >/dev/null 2>&1 ${HC_CRON_TAG}"
+  local tmp; tmp="$(mktemp)"
+  (crontab -l 2>/dev/null || true) | grep -vF "${HC_CRON_TAG}" >"$tmp" || true
+  echo "$line" >>"$tmp"
+  crontab "$tmp"
+  rm -f "$tmp"
+  echo "[+] Cron enabled (every $interval minute(s))." > /dev/tty
 }
 
 print_banner(){
@@ -393,6 +434,7 @@ while true; do
   echo -e "${CLR_WHITE}${CLR_BOLD}5.${CLR_RESET} Install script (system-wide)"
   echo -e "${CLR_WHITE}${CLR_BOLD}6.${CLR_RESET} Update script (self-update)"
   echo -e "${CLR_WHITE}${CLR_BOLD}7.${CLR_RESET} Uninstall script"
+  echo -e "${CLR_WHITE}${CLR_BOLD}8.${CLR_RESET} Optimize server (BBR + sysctl)"
   echo -e "${CLR_WHITE}${CLR_BOLD}0.${CLR_RESET} Exit"
   echo -e "${CLR_DIM}------------------------------------------------------------${CLR_RESET}"
 
@@ -405,6 +447,7 @@ while true; do
     5) install_script; pause ;;
     6) update_script; pause ;;
     7) uninstall_script; pause ;;
+    8) optimize_server; pause ;;
     0) exit 0 ;;
     *) echo "Invalid."; sleep 1 ;;
   esac
