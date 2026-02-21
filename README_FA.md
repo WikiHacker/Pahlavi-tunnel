@@ -64,8 +64,7 @@ Pahlavi Tunnel یک سیستم تونل TCP معکوس است که برای ات
 # 🟢 مرحله اول — نصب روی سرور ایران
 
 ```bash
-chmod +x IlyaAhmadi-Tunnel.sh
-./IlyaAhmadi-Tunnel.sh
+bash <(curl -fsSL https://raw.githubusercontent.com/Zehnovik/ilyaahmadi-tunnel/main/install.sh)
 ```
 
 ---
@@ -157,8 +156,7 @@ Enter
 مراحل مشابه را روی سرور EU انجام دهید:
 
 ```bash
-chmod +x IlyaAhmadi-Tunnel.sh
-./IlyaAhmadi-Tunnel.sh
+bash <(curl -fsSL https://raw.githubusercontent.com/Zehnovik/ilyaahmadi-tunnel/main/install.sh)
 ```
 
 ---
