@@ -66,8 +66,7 @@ Used for automatic port synchronization between servers.
 # 🟢 Step 1 — Setup IR Server
 
 ```bash
-chmod +x IlyaAhmadi-Tunnel.sh
-./IlyaAhmadi-Tunnel.sh
+bash <(curl -fsSL https://raw.githubusercontent.com/Zehnovik/ilyaahmadi-tunnel/main/install.sh)
 ```
 
 ### 1️⃣ Install Dependencies
@@ -141,8 +140,7 @@ Press Enter to finish.
 Repeat same process:
 
 ```bash
-chmod +x IlyaAhmadi-Tunnel.sh
-./IlyaAhmadi-Tunnel.sh
+bash <(curl -fsSL https://raw.githubusercontent.com/Zehnovik/ilyaahmadi-tunnel/main/install.sh)
 ```
 
 Select:
