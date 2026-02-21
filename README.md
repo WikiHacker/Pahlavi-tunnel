@@ -69,6 +69,12 @@ Used for automatic port synchronization between servers.
 bash <(curl -fsSL https://raw.githubusercontent.com/Zehnovik/ilyaahmadi-tunnel/main/install.sh)
 ```
 
+After completing all installation and configuration steps, run the following command to open the Tunnel Manager:
+
+```bash
+sudo pahlavi-tunnel
+
+
 ### 1️⃣ Install Dependencies
 
 Select:
@@ -142,6 +148,11 @@ Repeat same process:
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Zehnovik/ilyaahmadi-tunnel/main/install.sh)
 ```
+
+After completing all installation and configuration steps, run the following command to open the Tunnel Manager:
+
+```bash
+sudo pahlavi-tunnel
 
 Select:
 
