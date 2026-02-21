@@ -1,3 +1,5 @@
+🇮🇷 فارسی | 🌍 [English Version](README.md)
+
 # 🚀 Pahlavi Tunnel
 
 مدیریت‌کننده حرفه‌ای Reverse TCP Tunnel  
