@@ -67,6 +67,13 @@ Pahlavi Tunnel یک سیستم تونل TCP معکوس است که برای ات
 bash <(curl -fsSL https://raw.githubusercontent.com/Zehnovik/ilyaahmadi-tunnel/main/install.sh)
 ```
 
+برای اجرای منوی مدیریت تانل دستور زیر را وارد کنید:
+
+```bash
+sudo pahlavi-tunnel
+```
+
+
 ---
 
 ## 1️⃣ نصب کامل
