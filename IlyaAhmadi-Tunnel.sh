@@ -2,6 +2,7 @@
 set -euo pipefail
 
 APP_NAME="Pahlavi"
+CHANNEL_ID="@IlyaAhmadiD"
 TG_ID="@ilyaahmadiii"
 VERSION="1.0.0"
 
