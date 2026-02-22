@@ -165,7 +165,7 @@ Enter
 مراحل مشابه را روی سرور EU انجام دهید:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Zehnovik/ilyaahmadi-tunnel/main/install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/Zehnovik/Pahlavi-tunnel/main/install.sh)
 ```
 
 ---
