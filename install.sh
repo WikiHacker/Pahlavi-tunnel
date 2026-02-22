@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="https://raw.githubusercontent.com/Zehnovik/ilyaahmadi-tunnel/main"
-MANAGER_URL="$REPO/IlyaAhmadi-Tunnel.sh"
-PY_URL="$REPO/ilyaahmadi.py"
+REPO="https://raw.githubusercontent.com/Zehnovik/Pahlavi-tunnel/main"
+MANAGER_URL="$REPO/Pahlavi-Tunnel.sh"
+PY_URL="$REPO/Pahlavi.py"
 
 BIN="/usr/local/bin/pahlavi-tunnel"
 PY_DST="/usr/local/bin/ilyaahmadi.py"
