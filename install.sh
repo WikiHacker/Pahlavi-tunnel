@@ -6,7 +6,7 @@ MANAGER_URL="$REPO/Pahlavi-Tunnel.sh"
 PY_URL="$REPO/Pahlavi.py"
 
 BIN="/usr/local/bin/pahlavi-tunnel"
-PY_DST="/usr/local/bin/ilyaahmadi.py"
+PY_DST="/opt/pahlavi/Pahlavi.py"
 
 MODE="${1:-minimal}"   # minimal | full
 
@@ -47,14 +47,15 @@ info "Downloading manager..."
 curl -fsSL "$MANAGER_URL" -o "$tmp_dir/pahlavi-tunnel" || err "Failed to download manager"
 
 info "Downloading tunnel core..."
-curl -fsSL "$PY_URL" -o "$tmp_dir/ilyaahmadi.py" || err "Failed to download tunnel core"
+curl -fsSL "$PY_URL" -o "$tmp_dir/Pahlavi.py" || err "Failed to download tunnel core (Pahlavi.py)"
 
 # sanity check: non-empty files
 [[ -s "$tmp_dir/pahlavi-tunnel" ]] || err "Downloaded manager is empty"
-[[ -s "$tmp_dir/ilyaahmadi.py" ]] || err "Downloaded core is empty"
+[[ -s "$tmp_dir/Pahlavi.py" ]] || err "Downloaded core is empty"
 
 install -m 0755 "$tmp_dir/pahlavi-tunnel" "$BIN"
-install -m 0755 "$tmp_dir/ilyaahmadi.py" "$PY_DST"
+mkdir -p "$(dirname "$PY_DST")"
+install -m 0755 "$tmp_dir/Pahlavi.py" "$PY_DST"
 
 echo ""
 ok "Installation completed!"
