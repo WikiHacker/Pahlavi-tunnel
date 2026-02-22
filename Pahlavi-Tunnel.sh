@@ -11,7 +11,7 @@ GITHUB_REPO="github.com/Zehnovik/Pahlavi-tunnel"
 SCRIPT_FILENAME="Pahlavi-Tunnel.sh"
 SELF_URL="https://raw.githubusercontent.com/Zehnovik/Pahlavi-tunnel/main/${SCRIPT_FILENAME}"
 
-PY="/opt/pahlavi/ilyaahmadi.py"
+PY="/opt/pahlavi/Pahlavi.py"
 PY_URL="https://raw.githubusercontent.com/Zehnovik/Pahlavi-tunnel/main/Pahlavi.py"
 
 INSTALL_PATH="/usr/local/bin/pahlavi-tunnel"
