@@ -5,14 +5,14 @@ APP_NAME="Pahlavi"
 TG_ID="@ilyaahmadiii"
 VERSION="1.0.0"
 
-GITHUB_REPO="github.com/Zehnovik/ilyaahmadi-tunnel"
+GITHUB_REPO="github.com/Zehnovik/Pahlavi-tunnel"
 
 # MUST match GitHub file name exactly:
-SCRIPT_FILENAME="IlyaAhmadi-Tunnel.sh"
-SELF_URL="https://raw.githubusercontent.com/Zehnovik/ilyaahmadi-tunnel/main/${SCRIPT_FILENAME}"
+SCRIPT_FILENAME="Pahlavi-Tunnel.sh"
+SELF_URL="https://raw.githubusercontent.com/Zehnovik/Pahlavi-tunnel/main/${SCRIPT_FILENAME}"
 
 PY="/opt/pahlavi/ilyaahmadi.py"
-PY_URL="https://raw.githubusercontent.com/Zehnovik/ilyaahmadi-tunnel/main/ilyaahmadi.py"
+PY_URL="https://raw.githubusercontent.com/Zehnovik/Pahlavi-tunnel/main/Pahlavi.py"
 
 INSTALL_PATH="/usr/local/bin/pahlavi-tunnel"
 
