@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, sys, time, socket, struct, threading, subprocess, re
+import os, sys, time, socket, struct, threading, subprocess, re, resource
 from queue import Queue, Empty
 from typing import Optional
 
@@ -10,6 +10,77 @@ SOCKBUF = 8 * 1024 * 1024
 BUF_COPY = 256 * 1024
 POOL_WAIT = 5
 SYNC_INTERVAL = 3
+
+# --------- Auto pool sizing ----------
+def auto_pool_size(role: str = "ir") -> int:
+    """Pick a safe default pool size based on process FD limit + RAM.
+    Can be overridden with env var PAHLAVI_POOL (positive int).
+    """
+    # Allow explicit override
+    try:
+        env_pool = int(os.environ.get("PAHLAVI_POOL", "0"))
+        if env_pool > 0:
+            return env_pool
+    except Exception:
+        pass
+
+    # File descriptor limit for this process
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        nofile = soft if soft and soft > 0 else 1024
+    except Exception:
+        nofile = 1024
+
+    # Total RAM (best-effort)
+    mem_mb = 0
+    try:
+        with open("/proc/meminfo", "r") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    mem_kb = int(line.split()[1])
+                    mem_mb = mem_kb // 1024
+                    break
+    except Exception:
+        mem_mb = 0
+
+    # Reserve room for listeners, logs, timewait bursts, and user sockets
+    reserve = 500
+    fd_budget = max(0, nofile - reserve)
+
+    # IR side tends to have more concurrent user sockets; be more conservative
+    frac = 0.22 if role.lower().startswith("ir") else 0.30
+    fd_based = int(fd_budget * frac)
+
+    # RAM cap (rough): allow ~250 pool per 1GB
+    ram_based = int((mem_mb / 1024) * 250) if mem_mb else 500
+
+    pool = min(fd_based, ram_based)
+
+    # Clamp to sane bounds
+    if pool < 100:
+        pool = 100
+    if pool > 2000:
+        pool = 2000
+    return pool
+
+def is_socket_alive(s: socket.socket) -> bool:
+    """Best-effort check to avoid using dead sockets from the pool."""
+    try:
+        s.setblocking(False)
+        try:
+            data = s.recv(1, socket.MSG_PEEK)
+            if data == b"":
+                return False
+        except BlockingIOError:
+            return True
+        except Exception:
+            # If we can't peek, assume it's OK; actual send will validate
+            return True
+        finally:
+            s.setblocking(True)
+        return True
+    except Exception:
+        return False
 
 def tune_tcp(sock: socket.socket):
     try:
@@ -160,7 +231,12 @@ def ir_mode(bridge_port, sync_port, pool_size, auto_sync, manual_ports_csv):
         srv.listen(16384)
         print(f"[IR] Bridge listening on {bridge_port}")
         while True:
-            c, _ = srv.accept()
+            try:
+                c, _ = srv.accept()
+            except OSError as e:
+                print(f"[IR] accept_bridge error: {e}")
+                time.sleep(0.2)
+                continue
             tune_tcp(c)
             try:
                 pool.put(c, block=False)
@@ -170,9 +246,19 @@ def ir_mode(bridge_port, sync_port, pool_size, auto_sync, manual_ports_csv):
 
     def handle_user(user_sock: socket.socket, target_port: int):
         tune_tcp(user_sock)
-        try:
-            europe = pool.get(timeout=POOL_WAIT)
-        except Empty:
+        deadline = time.time() + POOL_WAIT
+        europe = None
+        while time.time() < deadline:
+            try:
+                cand = pool.get(timeout=max(0.1, deadline - time.time()))
+            except Empty:
+                break
+            if is_socket_alive(cand):
+                europe = cand
+                break
+            try: cand.close()
+            except Exception: pass
+        if europe is None:
             try: user_sock.close()
             except Exception: pass
             return
@@ -209,8 +295,18 @@ def ir_mode(bridge_port, sync_port, pool_size, auto_sync, manual_ports_csv):
 
         def accept_users():
             while True:
-                u, _ = srv.accept()
-                threading.Thread(target=handle_user, args=(u,p), daemon=True).start()
+                try:
+                    u, _ = srv.accept()
+                except OSError as e:
+                    print(f"[IR] accept_users({p}) error: {e}")
+                    time.sleep(0.2)
+                    continue
+                try:
+                    threading.Thread(target=handle_user, args=(u,p), daemon=True).start()
+                except Exception as e:
+                    print(f"[IR] spawn thread error: {e}")
+                    try: u.close()
+                    except Exception: pass
         threading.Thread(target=accept_users, daemon=True).start()
 
     def sync_listener():
@@ -220,7 +316,12 @@ def ir_mode(bridge_port, sync_port, pool_size, auto_sync, manual_ports_csv):
         srv.listen(1024)
         print(f"[IR] Sync listening on {sync_port} (AutoSync)")
         while True:
-            c, _ = srv.accept()
+            try:
+                c, _ = srv.accept()
+            except OSError as e:
+                print(f"[IR] accept_bridge error: {e}")
+                time.sleep(0.2)
+                continue
             def handle_sync(conn):
                 try:
                     while True:
@@ -288,16 +389,34 @@ def main():
         iran_ip = read_line()
         bridge = int(read_line() or "7000")
         sync = int(read_line() or "7001")
-        eu_mode(iran_ip, bridge, sync, pool_size=800)
+        pool = auto_pool_size("eu")
+        try:
+            nofile = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+        except Exception:
+            nofile = -1
+        print(f"[AUTO] role=EU nofile={nofile} pool={pool} (override: PAHLAVI_POOL)")
+        eu_mode(iran_ip, bridge, sync, pool_size=pool)
     else:
         bridge = int(read_line() or "7000")
         sync = int(read_line() or "7001")
         yn = (read_line() or "y").lower()
         if yn == "y":
-            ir_mode(bridge, sync, pool_size=800, auto_sync=True, manual_ports_csv="")
+            pool = auto_pool_size("ir")
+            try:
+                nofile = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+            except Exception:
+                nofile = -1
+            print(f"[AUTO] role=IR nofile={nofile} pool={pool} (override: PAHLAVI_POOL)")
+            ir_mode(bridge, sync, pool_size=pool, auto_sync=True, manual_ports_csv="")
         else:
             ports = read_line()
-            ir_mode(bridge, sync, pool_size=800, auto_sync=False, manual_ports_csv=ports)
+            pool = auto_pool_size("ir")
+            try:
+                nofile = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+            except Exception:
+                nofile = -1
+            print(f"[AUTO] role=IR nofile={nofile} pool={pool} (override: PAHLAVI_POOL)")
+            ir_mode(bridge, sync, pool_size=pool, auto_sync=False, manual_ports_csv=ports)
 
 if __name__ == "__main__":
     main()
