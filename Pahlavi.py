@@ -11,6 +11,23 @@ BUF_COPY = 256 * 1024
 POOL_WAIT = 5
 SYNC_INTERVAL = 3
 
+# Backlog for listen() (can be overridden via env PAHLAVI_BACKLOG)
+try:
+    LISTEN_BACKLOG = int(os.environ.get('PAHLAVI_BACKLOG', '65535'))
+except Exception:
+    LISTEN_BACKLOG = 65535
+LISTEN_BACKLOG = max(128, min(LISTEN_BACKLOG, 65535))
+
+# Optional socket buffer overrides (bytes)
+try:
+    SOCKBUF = int(os.environ.get('PAHLAVI_SOCKBUF', str(SOCKBUF)))
+except Exception:
+    pass
+try:
+    BUF_COPY = int(os.environ.get('PAHLAVI_BUF_COPY', str(BUF_COPY)))
+except Exception:
+    pass
+
 # --------- Auto pool sizing ----------
 def auto_pool_size(role: str = "ir") -> int:
     """Pick a safe default pool size based on process FD limit + RAM.
@@ -42,12 +59,6 @@ def auto_pool_size(role: str = "ir") -> int:
                     break
     except Exception:
         mem_mb = 0
-    # CPU cores (best-effort)
-    try:
-        cpu = os.cpu_count() or 1
-    except Exception:
-        cpu = 1
-
 
     # Reserve room for listeners, logs, timewait bursts, and user sockets
     reserve = 500
@@ -61,12 +72,6 @@ def auto_pool_size(role: str = "ir") -> int:
     ram_based = int((mem_mb / 1024) * 250) if mem_mb else 500
 
     pool = min(fd_based, ram_based)
-    # Also cap by CPU to avoid creating too many threads (EU uses pool_size threads)
-    if role.lower().startswith("eu"):
-        cpu_based = cpu * 60
-    else:
-        cpu_based = cpu * 120
-    pool = min(pool, cpu_based)
 
     # Clamp to sane bounds
     if pool < 100:
@@ -119,24 +124,8 @@ def tune_tcp(sock: socket.socket):
 
 def dial_tcp(host, port):
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    tune_tcp(s)
-    s.settimeout(DIAL_TIMEOUT)
-    s.connect((host, port))
-    s.settimeout(None)
-    return s
-
-
-def recv_exact(sock: socket.socket, n: int) -> Optional[bytes]:
-    """Receive exactly n bytes or return None if the connection closes."""
-    data = bytearray()
-    while len(data) < n:
-        chunk = sock.recv(n - len(data))
-        if not chunk:
-            return None
-        data.extend(chunk)
-    return bytes(data)
-
 def pipe(a: socket.socket, b: socket.socket):
+    # Deprecated: kept for backward compatibility (no longer used in bridge).
     buf = bytearray(BUF_COPY)
     try:
         while True:
@@ -153,57 +142,44 @@ def pipe(a: socket.socket, b: socket.socket):
         except Exception: pass
 
 def bridge(a: socket.socket, b: socket.socket):
-    """Bidirectional TCP forward without spawning per-direction threads.
-    Uses selectors/epoll in the *current* thread.
+    """Bidirectional socket bridge without spawning extra threads.
+
+    Uses selectors/epoll with small per-direction buffers to avoid thread explosion.
     """
     try:
         a.setblocking(False)
-    except Exception:
-        pass
-    try:
         b.setblocking(False)
     except Exception:
         pass
 
     sel = selectors.DefaultSelector()
-    buffers = {a: bytearray(), b: bytearray()}
-    peers = {a: b, b: a}
 
-    def want_read(sock: socket.socket):
+    # buffers for each direction
+    buf_ab = bytearray()
+    buf_ba = bytearray()
+    closed_a = False
+    closed_b = False
+
+    def reg(sock, events):
         try:
-            key = sel.get_key(sock)
-            events = key.events | selectors.EVENT_READ
-            sel.modify(sock, events, sock)
+            sel.register(sock, events)
         except KeyError:
-            sel.register(sock, selectors.EVENT_READ, sock)
-        except Exception:
-            pass
+            sel.modify(sock, events)
 
-    def want_write(sock: socket.socket):
-        try:
-            key = sel.get_key(sock)
-            events = key.events | selectors.EVENT_WRITE
-            sel.modify(sock, events, sock)
-        except KeyError:
-            sel.register(sock, selectors.EVENT_WRITE, sock)
-        except Exception:
-            pass
-
-    want_read(a)
-    want_read(b)
+    reg(a, selectors.EVENT_READ)
+    reg(b, selectors.EVENT_READ)
 
     try:
         while True:
-            events = sel.select(timeout=KEEPALIVE_SECS)
-            if not events:
-                # idle tick; keep loop alive
-                continue
-            for key, mask in events:
-                s = key.data
-                p = peers.get(s)
-                if p is None:
-                    continue
+            if closed_a and not buf_ba and closed_b and not buf_ab:
+                break
+            for key, mask in sel.select(timeout=1.0):
+                s = key.fileobj
+                peer = b if s is a else a
+                outbuf = buf_ab if s is a else buf_ba
+                inbuf = buf_ba if s is a else buf_ab
 
+                # READ
                 if mask & selectors.EVENT_READ:
                     try:
                         data = s.recv(BUF_COPY)
@@ -213,44 +189,75 @@ def bridge(a: socket.socket, b: socket.socket):
                         data = b""
                     if data is None:
                         pass
-                    elif data == b"":
-                        return
+                    elif data:
+                        inbuf += data
                     else:
-                        buffers[p].extend(data)
-                        want_write(p)
-
-                if mask & selectors.EVENT_WRITE:
-                    buf = buffers.get(s)
-                    if not buf:
-                        # nothing to send; stop watching write
+                        # EOF on s
+                        if s is a:
+                            closed_a = True
+                        else:
+                            closed_b = True
                         try:
-                            key2 = sel.get_key(s)
-                            sel.modify(s, key2.events & ~selectors.EVENT_WRITE, s)
+                            sel.modify(s, 0)
                         except Exception:
                             pass
-                        continue
-                    try:
-                        sent = s.send(buf)
-                        if sent > 0:
-                            del buf[:sent]
-                    except BlockingIOError:
-                        pass
-                    except Exception:
-                        return
+                        try:
+                            peer.shutdown(socket.SHUT_WR)
+                        except Exception:
+                            pass
+
+                # WRITE
+                if mask & selectors.EVENT_WRITE:
+                    if outbuf:
+                        try:
+                            sent = s.send(outbuf)
+                            if sent:
+                                del outbuf[:sent]
+                        except BlockingIOError:
+                            pass
+                        except Exception:
+                            # treat as closed
+                            if s is a:
+                                closed_a = True
+                            else:
+                                closed_b = True
+                            try:
+                                sel.modify(s, 0)
+                            except Exception:
+                                pass
+
+            # update interest based on pending buffers
+            events_a = (0 if closed_a else selectors.EVENT_READ) | (selectors.EVENT_WRITE if buf_ab else 0)
+            events_b = (0 if closed_b else selectors.EVENT_READ) | (selectors.EVENT_WRITE if buf_ba else 0)
+            if events_a:
+                reg(a, events_a)
+            if events_b:
+                reg(b, events_b)
     finally:
         try:
             sel.close()
         except Exception:
             pass
-        try:
-            a.close()
-        except Exception:
-            pass
-        try:
-            b.close()
-        except Exception:
-            pass
+        for s in (a, b):
+            try:
+                s.close()
+            except Exception:
+                pass
 
+        try: a.shutdown(socket.SHUT_RD)
+        except Exception: pass
+        try: b.shutdown(socket.SHUT_WR)
+        except Exception: pass
+
+def bridge(a: socket.socket, b: socket.socket):
+    t1 = threading.Thread(target=pipe, args=(a,b), daemon=True)
+    t2 = threading.Thread(target=pipe, args=(b,a), daemon=True)
+    t1.start(); t2.start()
+    t1.join(); t2.join()
+    try: a.close()
+    except Exception: pass
+    try: b.close()
+    except Exception: pass
 
 # --------- EU: detect listening TCP ports (like ss) ----------
 _port_re = re.compile(r":(\d+)$")
@@ -276,6 +283,25 @@ def get_listen_ports(exclude_bridge, exclude_sync):
 
 # --------- EU mode ----------
 def eu_mode(iran_ip, bridge_port, sync_port, pool_size):
+    # Cap the number of reverse-link workers to avoid thread explosion.
+    # For public use, this must be conservative by default; override via PAHLAVI_EU_MAX_LINKS or PAHLAVI_POOL.
+    cpu = os.cpu_count() or 1
+    try:
+        nofile = resource.getrlimit(resource.RLIMIT_NOFILE)[0] or 1024
+    except Exception:
+        nofile = 1024
+    try:
+        eu_cap_env = int(os.environ.get('PAHLAVI_EU_MAX_LINKS', '0'))
+    except Exception:
+        eu_cap_env = 0
+    # heuristic: per CPU ~150 links, and keep plenty of FD headroom
+    eu_cap = min(600, cpu * 150, max(50, nofile // 16))
+    if eu_cap_env > 0:
+        eu_cap = eu_cap_env
+    if pool_size > eu_cap:
+        print(f"[EU] Pool capped from {pool_size} to {eu_cap} (set PAHLAVI_EU_MAX_LINKS to override)")
+        pool_size = eu_cap
+
     def port_sync_loop():
         while True:
             try:
@@ -325,48 +351,41 @@ def ir_mode(bridge_port, sync_port, pool_size, auto_sync, manual_ports_csv):
     pool = Queue(maxsize=pool_size * 2)
     active = {}
     active_lock = threading.Lock()
-    # ---- Concurrency caps (avoid thread explosion under high load) ----
+
+    # Cap user handling concurrency to avoid thread explosion under load.
+    cpu = os.cpu_count() or 1
     try:
-        cpu = os.cpu_count() or 1
-    except Exception:
-        cpu = 1
-    try:
-        soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
-        nofile = soft if soft and soft > 0 else 1024
+        nofile = resource.getrlimit(resource.RLIMIT_NOFILE)[0] or 1024
     except Exception:
         nofile = 1024
-
-    def _get_int_env(name: str, default: int) -> int:
-        try:
-            v = int(os.environ.get(name, "").strip() or default)
-            return v
-        except Exception:
-            return default
-
-    # Default: scale with CPU, but keep a hard ceiling for safety on small VPSes
-    default_workers = min(400, max(50, cpu * 100), max(50, nofile // 20))
-    MAX_WORKERS = _get_int_env("PAHLAVI_MAX_WORKERS", default_workers)
-    MAX_WORKERS = max(10, min(MAX_WORKERS, 800))
-
-    default_inflight = MAX_WORKERS * 2
-    MAX_INFLIGHT = _get_int_env("PAHLAVI_MAX_INFLIGHT", default_inflight)
-    MAX_INFLIGHT = max(MAX_WORKERS, min(MAX_INFLIGHT, 5000))
-
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS)
+    try:
+        env_workers = int(os.environ.get('PAHLAVI_MAX_WORKERS', '0'))
+    except Exception:
+        env_workers = 0
+    # heuristic defaults for public use
+    MAX_WORKERS = min(300, cpu * 100, max(50, nofile // 20))
+    if env_workers > 0:
+        MAX_WORKERS = max(10, env_workers)
+    try:
+        env_inflight = int(os.environ.get('PAHLAVI_MAX_INFLIGHT', '0'))
+    except Exception:
+        env_inflight = 0
+    MAX_INFLIGHT = env_inflight if env_inflight > 0 else MAX_WORKERS * 2
     inflight = threading.Semaphore(MAX_INFLIGHT)
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS)
 
 
     def accept_bridge():
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         srv.bind(("0.0.0.0", bridge_port))
-        srv.listen(16384)
+        srv.listen(LISTEN_BACKLOG)
         print(f"[IR] Bridge listening on {bridge_port}")
         while True:
             try:
                 c, _ = srv.accept()
             except OSError as e:
-                print(f"[IR] accept_bridge error: {e}")
+                print(f"[IR] sync_listener error: {e}")
                 time.sleep(0.2)
                 continue
             tune_tcp(c)
@@ -416,7 +435,7 @@ def ir_mode(bridge_port, sync_port, pool_size, auto_sync, manual_ports_csv):
             srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             srv.bind(("0.0.0.0", p))
-            srv.listen(16384)
+            srv.listen(LISTEN_BACKLOG)
         except Exception as e:
             with active_lock:
                 active.pop(p, None)
@@ -432,42 +451,35 @@ def ir_mode(bridge_port, sync_port, pool_size, auto_sync, manual_ports_csv):
                 except OSError as e:
                     print(f"[IR] accept_users({p}) error: {e}")
                     time.sleep(0.2)
-                    continue                # Cap concurrent sessions to prevent thread explosion
-                if not inflight.acquire(blocking=False):
-                    try:
-                        u.close()
-                    except Exception:
-                        pass
                     continue
-
-                def _run():
-                    try:
-                        handle_user(u, p)
-                    finally:
-                        inflight.release()
-
                 try:
+                    if not inflight.acquire(blocking=False):
+                        try: u.close()
+                        except Exception: pass
+                        continue
+                    def _run(u_sock=u, port=p):
+                        try:
+                            handle_user(u_sock, port)
+                        finally:
+                            inflight.release()
                     executor.submit(_run)
                 except Exception as e:
-                    print(f"[IR] executor submit error: {e}")
-                    try:
-                        u.close()
-                    except Exception:
-                        pass
-                    inflight.release()
+                    print(f"[IR] spawn thread error: {e}")
+                    try: u.close()
+                    except Exception: pass
         threading.Thread(target=accept_users, daemon=True).start()
 
     def sync_listener():
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         srv.bind(("0.0.0.0", sync_port))
-        srv.listen(1024)
+        srv.listen(LISTEN_BACKLOG)
         print(f"[IR] Sync listening on {sync_port} (AutoSync)")
         while True:
             try:
                 c, _ = srv.accept()
             except OSError as e:
-                print(f"[IR] sync_listener error: {e}")
+                print(f"[IR] accept_bridge error: {e}")
                 time.sleep(0.2)
                 continue
             def handle_sync(conn):
