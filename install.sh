@@ -25,7 +25,7 @@ info "Updating package lists..."
 apt-get update -y >/dev/null 2>&1 || apt-get update >/dev/null 2>&1
 
 # Minimal deps: run manager + core safely
-BASE_DEPS=(curl ca-certificates python3)
+BASE_DEPS=(curl ca-certificates python3 iproute2)
 
 # Full deps: features you added (cron/iptables/nft/haproxy/socat/ss)
 FULL_DEPS=(screen iproute2 cron iptables nftables haproxy socat)
