@@ -234,7 +234,7 @@ def ir_mode(bridge_port, sync_port, pool_size, auto_sync, manual_ports_csv):
             try:
                 c, _ = srv.accept()
             except OSError as e:
-                print(f"[IR] sync_listener error: {e}")
+                print(f"[IR] accept_bridge error: {e}")
                 time.sleep(0.2)
                 continue
             tune_tcp(c)
@@ -319,7 +319,7 @@ def ir_mode(bridge_port, sync_port, pool_size, auto_sync, manual_ports_csv):
             try:
                 c, _ = srv.accept()
             except OSError as e:
-                print(f"[IR] accept_bridge error: {e}")
+                print(f"[IR] sync_listener error: {e}")
                 time.sleep(0.2)
                 continue
             def handle_sync(conn):
