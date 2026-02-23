@@ -281,12 +281,12 @@ run_slot(){
   screen -S "$s" -X quit >/dev/null 2>&1 || true
 
   if [[ "$ROLE" == "eu" ]]; then
-    screen -dmS "$s" bash -lc "ulimit -n ${ULIMIT_NOFILE:-65535} >/dev/null 2>&1 || true; printf '1\n%s\n%s\n%s\n' '$IRAN_IP' '$BRIDGE' '$SYNC' | PAHLAVI_POOL="${PAHLAVI_POOL:-0}" python3 '$PY'"
+    screen -dmS "$s" bash -lc "ulimit -Hn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; ulimit -Sn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; printf '1\n%s\n%s\n%s\n' '$IRAN_IP' '$BRIDGE' '$SYNC' | PAHLAVI_POOL="${PAHLAVI_POOL:-0}" python3 '$PY'"
   else
     if [[ "${AUTO_SYNC:-true}" == "true" ]]; then
-      screen -dmS "$s" bash -lc "ulimit -n ${ULIMIT_NOFILE:-65535} >/dev/null 2>&1 || true; printf '2\n%s\n%s\ny\n' '$BRIDGE' '$SYNC' | PAHLAVI_POOL="${PAHLAVI_POOL:-0}" python3 '$PY'"
+      screen -dmS "$s" bash -lc "ulimit -Hn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; ulimit -Sn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; printf '2\n%s\n%s\ny\n' '$BRIDGE' '$SYNC' | PAHLAVI_POOL="${PAHLAVI_POOL:-0}" python3 '$PY'"
     else
-      screen -dmS "$s" bash -lc "ulimit -n ${ULIMIT_NOFILE:-65535} >/dev/null 2>&1 || true; printf '2\n%s\n%s\nn\n%s\n' '$BRIDGE' '$SYNC' '${PORTS:-}' | PAHLAVI_POOL="${PAHLAVI_POOL:-0}" python3 '$PY'"
+      screen -dmS "$s" bash -lc "ulimit -Hn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; ulimit -Sn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; printf '2\n%s\n%s\nn\n%s\n' '$BRIDGE' '$SYNC' '${PORTS:-}' | PAHLAVI_POOL="${PAHLAVI_POOL:-0}" python3 '$PY'"
     fi
   fi
   echo "[+] Started: $s" > /dev/tty
@@ -324,12 +324,12 @@ start_from_profile(){
   local s; s="\$(session_name "\$prof")"
   screen -S "\$s" -X quit >/dev/null 2>&1 || true
   if [[ "\${ROLE}" == "eu" ]]; then
-    screen -dmS "\$s" bash -lc "ulimit -n ${ULIMIT_NOFILE:-65535} >/dev/null 2>&1 || true; printf '1\\n%s\\n%s\\n%s\\n' '\${IRAN_IP}' '\${BRIDGE}' '\${SYNC}' | PAHLAVI_POOL="\${PAHLAVI_POOL:-0}" python3 '\${PY}'"
+    screen -dmS "\$s" bash -lc "ulimit -Hn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; ulimit -Sn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; printf '1\\n%s\\n%s\\n%s\\n' '\${IRAN_IP}' '\${BRIDGE}' '\${SYNC}' | PAHLAVI_POOL="\${PAHLAVI_POOL:-0}" python3 '\${PY}'"
   else
     if [[ "\${AUTO_SYNC:-true}" == "true" ]]; then
-      screen -dmS "\$s" bash -lc "ulimit -n ${ULIMIT_NOFILE:-65535} >/dev/null 2>&1 || true; printf '2\\n%s\\n%s\\ny\\n' '\${BRIDGE}' '\${SYNC}' | PAHLAVI_POOL="\${PAHLAVI_POOL:-0}" python3 '\${PY}'"
+      screen -dmS "\$s" bash -lc "ulimit -Hn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; ulimit -Sn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; printf '2\\n%s\\n%s\\ny\\n' '\${BRIDGE}' '\${SYNC}' | PAHLAVI_POOL="\${PAHLAVI_POOL:-0}" python3 '\${PY}'"
     else
-      screen -dmS "\$s" bash -lc "ulimit -n ${ULIMIT_NOFILE:-65535} >/dev/null 2>&1 || true; printf '2\\n%s\\n%s\\nn\\n%s\\n' '\${BRIDGE}' '\${SYNC}' '\${PORTS:-}' | PAHLAVI_POOL="\${PAHLAVI_POOL:-0}" python3 '\${PY}'"
+      screen -dmS "\$s" bash -lc "ulimit -Hn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; ulimit -Sn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; printf '2\\n%s\\n%s\\nn\\n%s\\n' '\${BRIDGE}' '\${SYNC}' '\${PORTS:-}' | PAHLAVI_POOL="\${PAHLAVI_POOL:-0}" python3 '\${PY}'"
     fi
   fi
 }
