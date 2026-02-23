@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, sys, time, socket, struct, threading, subprocess, re, resource
+import os, sys, time, socket, struct, threading, subprocess, re, resource, selectors, concurrent.futures
 from queue import Queue, Empty
 from typing import Optional
 
@@ -42,6 +42,12 @@ def auto_pool_size(role: str = "ir") -> int:
                     break
     except Exception:
         mem_mb = 0
+    # CPU cores (best-effort)
+    try:
+        cpu = os.cpu_count() or 1
+    except Exception:
+        cpu = 1
+
 
     # Reserve room for listeners, logs, timewait bursts, and user sockets
     reserve = 500
@@ -55,6 +61,12 @@ def auto_pool_size(role: str = "ir") -> int:
     ram_based = int((mem_mb / 1024) * 250) if mem_mb else 500
 
     pool = min(fd_based, ram_based)
+    # Also cap by CPU to avoid creating too many threads (EU uses pool_size threads)
+    if role.lower().startswith("eu"):
+        cpu_based = cpu * 60
+    else:
+        cpu_based = cpu * 120
+    pool = min(pool, cpu_based)
 
     # Clamp to sane bounds
     if pool < 100:
@@ -141,14 +153,104 @@ def pipe(a: socket.socket, b: socket.socket):
         except Exception: pass
 
 def bridge(a: socket.socket, b: socket.socket):
-    t1 = threading.Thread(target=pipe, args=(a,b), daemon=True)
-    t2 = threading.Thread(target=pipe, args=(b,a), daemon=True)
-    t1.start(); t2.start()
-    t1.join(); t2.join()
-    try: a.close()
-    except Exception: pass
-    try: b.close()
-    except Exception: pass
+    """Bidirectional TCP forward without spawning per-direction threads.
+    Uses selectors/epoll in the *current* thread.
+    """
+    try:
+        a.setblocking(False)
+    except Exception:
+        pass
+    try:
+        b.setblocking(False)
+    except Exception:
+        pass
+
+    sel = selectors.DefaultSelector()
+    buffers = {a: bytearray(), b: bytearray()}
+    peers = {a: b, b: a}
+
+    def want_read(sock: socket.socket):
+        try:
+            key = sel.get_key(sock)
+            events = key.events | selectors.EVENT_READ
+            sel.modify(sock, events, sock)
+        except KeyError:
+            sel.register(sock, selectors.EVENT_READ, sock)
+        except Exception:
+            pass
+
+    def want_write(sock: socket.socket):
+        try:
+            key = sel.get_key(sock)
+            events = key.events | selectors.EVENT_WRITE
+            sel.modify(sock, events, sock)
+        except KeyError:
+            sel.register(sock, selectors.EVENT_WRITE, sock)
+        except Exception:
+            pass
+
+    want_read(a)
+    want_read(b)
+
+    try:
+        while True:
+            events = sel.select(timeout=KEEPALIVE_SECS)
+            if not events:
+                # idle tick; keep loop alive
+                continue
+            for key, mask in events:
+                s = key.data
+                p = peers.get(s)
+                if p is None:
+                    continue
+
+                if mask & selectors.EVENT_READ:
+                    try:
+                        data = s.recv(BUF_COPY)
+                    except BlockingIOError:
+                        data = None
+                    except Exception:
+                        data = b""
+                    if data is None:
+                        pass
+                    elif data == b"":
+                        return
+                    else:
+                        buffers[p].extend(data)
+                        want_write(p)
+
+                if mask & selectors.EVENT_WRITE:
+                    buf = buffers.get(s)
+                    if not buf:
+                        # nothing to send; stop watching write
+                        try:
+                            key2 = sel.get_key(s)
+                            sel.modify(s, key2.events & ~selectors.EVENT_WRITE, s)
+                        except Exception:
+                            pass
+                        continue
+                    try:
+                        sent = s.send(buf)
+                        if sent > 0:
+                            del buf[:sent]
+                    except BlockingIOError:
+                        pass
+                    except Exception:
+                        return
+    finally:
+        try:
+            sel.close()
+        except Exception:
+            pass
+        try:
+            a.close()
+        except Exception:
+            pass
+        try:
+            b.close()
+        except Exception:
+            pass
+
 
 # --------- EU: detect listening TCP ports (like ss) ----------
 _port_re = re.compile(r":(\d+)$")
@@ -223,6 +325,36 @@ def ir_mode(bridge_port, sync_port, pool_size, auto_sync, manual_ports_csv):
     pool = Queue(maxsize=pool_size * 2)
     active = {}
     active_lock = threading.Lock()
+    # ---- Concurrency caps (avoid thread explosion under high load) ----
+    try:
+        cpu = os.cpu_count() or 1
+    except Exception:
+        cpu = 1
+    try:
+        soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+        nofile = soft if soft and soft > 0 else 1024
+    except Exception:
+        nofile = 1024
+
+    def _get_int_env(name: str, default: int) -> int:
+        try:
+            v = int(os.environ.get(name, "").strip() or default)
+            return v
+        except Exception:
+            return default
+
+    # Default: scale with CPU, but keep a hard ceiling for safety on small VPSes
+    default_workers = min(400, max(50, cpu * 100), max(50, nofile // 20))
+    MAX_WORKERS = _get_int_env("PAHLAVI_MAX_WORKERS", default_workers)
+    MAX_WORKERS = max(10, min(MAX_WORKERS, 800))
+
+    default_inflight = MAX_WORKERS * 2
+    MAX_INFLIGHT = _get_int_env("PAHLAVI_MAX_INFLIGHT", default_inflight)
+    MAX_INFLIGHT = max(MAX_WORKERS, min(MAX_INFLIGHT, 5000))
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS)
+    inflight = threading.Semaphore(MAX_INFLIGHT)
+
 
     def accept_bridge():
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -300,13 +432,29 @@ def ir_mode(bridge_port, sync_port, pool_size, auto_sync, manual_ports_csv):
                 except OSError as e:
                     print(f"[IR] accept_users({p}) error: {e}")
                     time.sleep(0.2)
+                    continue                # Cap concurrent sessions to prevent thread explosion
+                if not inflight.acquire(blocking=False):
+                    try:
+                        u.close()
+                    except Exception:
+                        pass
                     continue
+
+                def _run():
+                    try:
+                        handle_user(u, p)
+                    finally:
+                        inflight.release()
+
                 try:
-                    threading.Thread(target=handle_user, args=(u,p), daemon=True).start()
+                    executor.submit(_run)
                 except Exception as e:
-                    print(f"[IR] spawn thread error: {e}")
-                    try: u.close()
-                    except Exception: pass
+                    print(f"[IR] executor submit error: {e}")
+                    try:
+                        u.close()
+                    except Exception:
+                        pass
+                    inflight.release()
         threading.Thread(target=accept_users, daemon=True).start()
 
     def sync_listener():
