@@ -50,7 +50,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple, Callable
 
 
 # ------------------------- Helpers -------------------------
@@ -139,16 +139,30 @@ class Tunables:
     backlog_sync: int = _env_int("PAHLAVI_BACKLOG_SYNC", 1024)
 
     # Backpressure threshold for asyncio StreamWriter buffer.
-    drain_threshold: int = _env_int("PAHLAVI_DRAIN_THRESHOLD", 1 * 1024 * 1024)
+    drain_threshold: int = _env_int("PAHLAVI_DRAIN_THRESHOLD", 256 * 1024)
 
     # AutoSync protocol limit (can be >255 with PT1 framing).
     max_sync_ports: int = _env_int("PAHLAVI_MAX_SYNC_PORTS", 512)
 
     # Recycle idle reverse connections to reduce NAT idle-drop issues.
     pool_max_age: float = _env_float("PAHLAVI_POOL_MAX_AGE", 300.0)
+    # Heartbeat pooled reverse connections (seconds). Helps NAT/CGNAT idle-drop.
+    pool_ping_interval: float = _env_float("PAHLAVI_POOL_PING_INTERVAL", 10.0)
+
+
+    # How often to scan/recycle too-old pooled connections.
+    pool_recycle_interval: float = _env_float("PAHLAVI_POOL_RECYCLE_INTERVAL", 30.0)
+
+
+    # Close proxied sessions if completely idle for this many seconds (0 = disabled).
+    session_idle: float = _env_float("PAHLAVI_SESSION_IDLE", 600.0)
+
+
+    # Optional global cap on concurrently active user sessions (0 = unlimited).
+    max_sessions: int = _env_int("PAHLAVI_MAX_SESSIONS", 0)
 
     # Limit concurrent TCP dial attempts (prevents "connection storm" when IR is down)
-    dial_concurrency: int = _env_int("PAHLAVI_DIAL_CONCURRENCY", 200)
+    dial_concurrency: int = _env_int("PAHLAVI_DIAL_CONCURRENCY", 50)
 
     # Bind/Connect hosts
     ir_bind_host: str = _env_str("PAHLAVI_IR_BIND", "0.0.0.0")
@@ -305,24 +319,46 @@ async def _close_writer(writer: Optional[asyncio.StreamWriter]) -> None:
 
 # ------------------------- Proxy core -------------------------
 
-async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-    """Copy bytes from reader to writer with backpressure."""
+async def _pipe(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    activity_cb: Optional[Callable[[], None]] = None,
+) -> None:
+    """Copy bytes from reader to writer with backpressure + clean shutdown.
 
+    We keep this very defensive because under real-world loss/RESET conditions
+    writers can disappear while we're still proxying.
+    """
     try:
         while True:
-            data = await reader.read(T.copy_chunk)
+            if T.session_idle > 0:
+                data = await asyncio.wait_for(reader.read(T.copy_chunk), timeout=T.session_idle)
+            else:
+                data = await reader.read(T.copy_chunk)
+
             if not data:
                 break
+
+            if activity_cb:
+                activity_cb()
+
             writer.write(data)
+
+            # Backpressure: drain when buffer grows.
             transport = writer.transport
             if transport is not None and transport.get_write_buffer_size() > T.drain_threshold:
                 await writer.drain()
+    except asyncio.TimeoutError:
+        # Idle too long
+        pass
     except asyncio.CancelledError:
         raise
+    except (ConnectionResetError, BrokenPipeError):
+        pass
     except Exception:
         pass
     finally:
-        # Half-close destination so the other direction can finish cleanly.
+        # Half-close destination so the other direction can finish cleanly if possible.
         try:
             writer.write_eof()
         except Exception:
@@ -335,13 +371,41 @@ async def proxy_bidirectional(
     b_reader: asyncio.StreamReader,
     b_writer: asyncio.StreamWriter,
 ) -> None:
-    """Bidirectional proxy between (a) and (b)."""
+    """Bidirectional proxy between (a) and (b) with fast tear-down.
 
-    t1 = asyncio.create_task(_pipe(a_reader, b_writer))
-    t2 = asyncio.create_task(_pipe(b_reader, a_writer))
+    When one direction ends, we cancel the other immediately to prevent
+    "write on dead socket" cascades (which create jitter and log spam).
+    Also enforces an optional session idle timeout.
+    """
+    last_activity = time.time()
+
+    def touch() -> None:
+        nonlocal last_activity
+        last_activity = time.time()
+
+    t1 = asyncio.create_task(_pipe(a_reader, b_writer, touch))
+    t2 = asyncio.create_task(_pipe(b_reader, a_writer, touch))
+
+    async def idle_watchdog() -> None:
+        if T.session_idle <= 0:
+            return
+        while True:
+            await asyncio.sleep(min(1.0, T.session_idle))
+            if time.time() - last_activity > T.session_idle:
+                # Cancel both directions
+                for t in (t1, t2):
+                    if not t.done():
+                        t.cancel()
+                return
+
+    wd = asyncio.create_task(idle_watchdog())
     try:
-        await asyncio.gather(t1, t2)
+        done, pending = await asyncio.wait({t1, t2}, return_when=asyncio.FIRST_COMPLETED)
+        for t in pending:
+            t.cancel()
+        await asyncio.gather(t1, t2, return_exceptions=True)
     finally:
+        wd.cancel()
         await asyncio.gather(_close_writer(a_writer), _close_writer(b_writer), return_exceptions=True)
 
 
@@ -422,6 +486,7 @@ class EUConfig:
     bridge_port: int
     sync_port: int
     pool_size: int
+    enable_autosync: bool = True
 
 
 async def eu_port_sync_loop(cfg: EUConfig, stop: asyncio.Event, dial_sem: asyncio.Semaphore) -> None:
@@ -478,11 +543,19 @@ async def eu_reverse_worker(cfg: EUConfig, worker_id: int, stop: asyncio.Event, 
             created_at = time.time()
             backoff = 0.2
 
-            # Wait for a 2-byte port assignment from IR
-            hdr = await reader.readexactly(2)
-            (target_port,) = struct.unpack("!H", hdr)
-            if not (1 <= target_port <= 65535):
-                raise ValueError(f"Invalid target port: {target_port}")
+            # Wait for a 2-byte port assignment from IR.
+            # IR may occasionally send port=0 as a lightweight heartbeat for idle pool sockets.
+            while True:
+                hdr = await reader.readexactly(2)
+                (target_port,) = struct.unpack("!H", hdr)
+                if target_port == 0:
+                    # heartbeat - stay idle
+                    continue
+                if not (1 <= target_port <= 65535):
+                    raise ValueError(f"Invalid target port: {target_port}")
+                break
+
+            # Connect to local service
 
             # Connect to local service
             l_reader, l_writer = await _open_connection(T.eu_local_host, target_port)
@@ -547,7 +620,10 @@ async def run_eu(cfg: EUConfig) -> None:
             pass
 
     tasks: List[asyncio.Task] = []
-    tasks.append(asyncio.create_task(_supervise_task("EU:sync", stop, lambda: eu_port_sync_loop(cfg, stop, dial_sem))))
+    if cfg.enable_autosync:
+        tasks.append(asyncio.create_task(_supervise_task("EU:sync", stop, lambda: eu_port_sync_loop(cfg, stop, dial_sem))))
+    else:
+        log.info("[EU] AutoSync disabled by config")
     for i in range(cfg.pool_size):
         wid = i + 1
         tasks.append(asyncio.create_task(_supervise_task(f"EU:worker:{wid}", stop, lambda wid=wid: eu_reverse_worker(cfg, wid, stop, dial_sem))))
@@ -761,6 +837,56 @@ async def run_ir(cfg: IRConfig) -> None:
 
     pool = BridgePool(maxsize=cfg.pool_size * 2)
 
+
+session_sem: Optional[asyncio.Semaphore] = None
+if T.max_sessions and T.max_sessions > 0:
+    session_sem = asyncio.Semaphore(T.max_sessions)
+
+async def _with_session_limit(coro):
+    if session_sem is None:
+        return await coro
+    await session_sem.acquire()
+    try:
+        return await coro
+    finally:
+        session_sem.release()
+
+async def pool_pinger() -> None:
+    # Send lightweight heartbeat (port=0) over idle pool sockets to keep NAT mappings alive.
+    if T.pool_ping_interval <= 0:
+        return
+    while not stop.is_set():
+        await asyncio.sleep(T.pool_ping_interval)
+        items: List[PooledConn] = []
+        while True:
+            try:
+                items.append(pool._q.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        for it in items:
+            # Drop too-old
+            if time.time() - it.created_at > T.pool_max_age:
+                await _close_writer(it.writer)
+                continue
+            try:
+                it.writer.write(struct.pack("!H", 0))
+                await asyncio.wait_for(it.writer.drain(), timeout=1.0)
+                await pool.put(it)
+            except Exception:
+                await _close_writer(it.writer)
+
+async def pool_recycler() -> None:
+    if T.pool_recycle_interval <= 0:
+        return
+    while not stop.is_set():
+        await asyncio.sleep(T.pool_recycle_interval)
+        try:
+            removed = await pool.recycle_stale()
+            if removed:
+                log.debug("[IR] Recycled %d stale pooled conns", removed)
+        except Exception:
+            pass
+
     active_ports: Dict[int, asyncio.AbstractServer] = {}
     active_lock = asyncio.Lock()
 
@@ -772,7 +898,7 @@ async def run_ir(cfg: IRConfig) -> None:
                 return
 
             async def on_user(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-                await ir_handle_user(reader, writer, p, pool)
+                await _with_session_limit(ir_handle_user(reader, writer, p, pool))
 
             try:
                 server = await asyncio.start_server(
@@ -821,6 +947,8 @@ async def run_ir(cfg: IRConfig) -> None:
 
     tasks: List[asyncio.Task] = []
     tasks.append(asyncio.create_task(ir_accept_bridge(cfg, pool)))
+    tasks.append(asyncio.create_task(pool_pinger()))
+    tasks.append(asyncio.create_task(pool_recycler()))
 
     if cfg.auto_sync:
         tasks.append(asyncio.create_task(ir_sync_listener(cfg, apply_desired_ports)))
@@ -904,7 +1032,7 @@ def main() -> None:
     _bump_nofile(_env_int("PAHLAVI_NOFILE_TARGET", 65535))
 
     # expected input order (from your shell wrapper):
-    # EU: 1, IRAN_IP, BRIDGE, SYNC
+    # EU: 1, IRAN_IP, BRIDGE, SYNC, EU_AUTOSYNC(y/n)
     # IR: 2, BRIDGE, SYNC, y|n, [PORTS if n]
     choice = read_line()
     if choice not in ("1", "2"):
@@ -915,13 +1043,34 @@ def main() -> None:
         iran_ip = read_line() or "127.0.0.1"
         bridge = int(read_line() or "7000")
         sync = int(read_line() or "7001")
+
+        autosync_line = read_line()
+        if not autosync_line and sys.stdin.isatty():
+            autosync_line = (input("Enable AutoSync (EU -> IR port sync)? [Y/n]: ") or "y").strip()
+        enable_autosync = (autosync_line or "y").lower().startswith("y")
+
         pool = auto_pool_size("eu")
         try:
             nofile = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
         except Exception:
             nofile = -1
-        log.info("[AUTO] role=EU nofile=%s pool=%s (override: PAHLAVI_POOL)", nofile, pool)
-        asyncio.run(run_eu(EUConfig(iran_ip=iran_ip, bridge_port=bridge, sync_port=sync, pool_size=pool)))
+        log.info(
+            "[AUTO] role=EU nofile=%s pool=%s autosync=%s (override: PAHLAVI_POOL)",
+            nofile,
+            pool,
+            enable_autosync,
+        )
+        asyncio.run(
+            run_eu(
+                EUConfig(
+                    iran_ip=iran_ip,
+                    bridge_port=bridge,
+                    sync_port=sync,
+                    pool_size=pool,
+                    enable_autosync=enable_autosync,
+                )
+            )
+        )
     else:
         bridge = int(read_line() or "7000")
         sync = int(read_line() or "7001")
