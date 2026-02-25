@@ -42,6 +42,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import hmac
+import secrets
+from pathlib import Path
 import resource
 import signal
 import socket
@@ -95,6 +98,26 @@ def _setup_logging() -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
+def _bump_nofile(target: int = 65535) -> None:
+    """Best-effort: raise RLIMIT_NOFILE soft limit up to 'target' (capped by hard limit).
+
+    This helps stability under load (many concurrent sockets). Requires permissions to raise.
+    """
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        cap = hard if hard != resource.RLIM_INFINITY else target
+        new_soft = min(int(target), int(cap))
+        if new_soft > soft:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft, hard))
+            soft2, hard2 = resource.getrlimit(resource.RLIMIT_NOFILE)
+            # logging may not be configured yet; print is ok early.
+            print(f"[nofile] bumped soft {soft}->{soft2} (hard={hard2})")
+        else:
+            # Avoid noisy logs in production
+            pass
+    except Exception as e:
+        print(f"[nofile] failed to bump: {e}")
+
 
 log = logging.getLogger("pahlavi")
 
@@ -121,8 +144,8 @@ class Tunables:
     # Backpressure threshold for asyncio StreamWriter buffer.
     drain_threshold: int = _env_int("PAHLAVI_DRAIN_THRESHOLD", 1 * 1024 * 1024)
 
-    # AutoSync protocol limit (1 byte count).
-    max_sync_ports: int = 255
+    # AutoSync protocol limit (can be >255 with PT1 framing).
+    max_sync_ports: int = _env_int("PAHLAVI_MAX_SYNC_PORTS", 512)
 
     # Recycle idle reverse connections to reduce NAT idle-drop issues.
     pool_max_age: float = _env_float("PAHLAVI_POOL_MAX_AGE", 300.0)
@@ -260,6 +283,13 @@ def _tune_writer_socket(writer: asyncio.StreamWriter) -> None:
     if isinstance(sock, socket.socket):
         tune_tcp(sock)
 
+
+
+async def _open_connection_ir(host: str, port: int, token: str) -> Tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    """Dial TCP to IR and perform token auth (PTK1)."""
+    reader, writer = await _open_connection(host, port)
+    await _send_auth(writer, token)
+    return reader, writer
 
 async def _open_connection(host: str, port: int) -> Tuple[asyncio.StreamReader, asyncio.StreamWriter]:
     """Dial TCP with timeout + tuning."""
@@ -401,6 +431,7 @@ class EUConfig:
     bridge_port: int
     sync_port: int
     pool_size: int
+    token: str
 
 
 async def eu_port_sync_loop(cfg: EUConfig, stop: asyncio.Event, dial_sem: asyncio.Semaphore) -> None:
@@ -412,14 +443,16 @@ async def eu_port_sync_loop(cfg: EUConfig, stop: asyncio.Event, dial_sem: asynci
         writer: Optional[asyncio.StreamWriter] = None
         try:
             async with dial_sem:
-                reader, writer = await _open_connection(cfg.iran_ip, cfg.sync_port)
+                reader, writer = await _open_connection_ir(cfg.iran_ip, cfg.sync_port, cfg.token)
             _ = reader  # unused
             backoff = 0.5
             log.info("[EU] AutoSync connected -> %s:%s", cfg.iran_ip, cfg.sync_port)
 
             while not stop.is_set():
                 ports = get_listen_ports(cfg.bridge_port, cfg.sync_port)[: T.max_sync_ports]
-                payload = bytes([len(ports)]) + b"".join(struct.pack("!H", p) for p in ports)
+                count = min(len(ports), max(0, int(T.max_sync_ports)))
+                # PT1 framing: b'PT1' + u16 count + u16 ports... (fallback compatible on IR)
+                payload = b"PT1" + struct.pack("!H", count) + b"".join(struct.pack("!H", p) for p in ports[:count])
                 writer.write(payload)
                 await writer.drain()
                 await asyncio.sleep(T.sync_interval)
@@ -451,7 +484,7 @@ async def eu_reverse_worker(cfg: EUConfig, worker_id: int, stop: asyncio.Event, 
         writer: Optional[asyncio.StreamWriter] = None
         try:
             async with dial_sem:
-                reader, writer = await _open_connection(cfg.iran_ip, cfg.bridge_port)
+                reader, writer = await _open_connection_ir(cfg.iran_ip, cfg.bridge_port, cfg.token)
             created_at = time.time()
             backoff = 0.2
 
@@ -485,12 +518,38 @@ async def eu_reverse_worker(cfg: EUConfig, worker_id: int, stop: asyncio.Event, 
         backoff = min(backoff * 2, 5.0)
 
 
+
+async def _supervise_task(name: str, stop: asyncio.Event, coro_factory, backoff_start: float = 0.2) -> None:
+    backoff = backoff_start
+    while not stop.is_set():
+        try:
+            await coro_factory()
+            if not stop.is_set():
+                log.warning("[%s] Task exited; restarting", name)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            if not stop.is_set():
+                log.warning("[%s] crashed: %s (restart in %.1fs)", name, e, backoff)
+        await asyncio.sleep(backoff)
+        backoff = min(backoff * 2, 5.0)
+
 async def run_eu(cfg: EUConfig) -> None:
     stop = asyncio.Event()
 
     dial_sem = asyncio.Semaphore(max(1, int(T.dial_concurrency)))
 
     loop = asyncio.get_running_loop()
+    def _eh(loop, context):
+        msg = context.get("message")
+        exc = context.get("exception")
+        log.warning("[IR] loop exception: %s %s", msg, exc)
+    loop.set_exception_handler(_eh)
+    def _eh(loop, context):
+        msg = context.get("message")
+        exc = context.get("exception")
+        log.warning("[EU] loop exception: %s %s", msg, exc)
+    loop.set_exception_handler(_eh)
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
             loop.add_signal_handler(sig, stop.set)
@@ -498,9 +557,10 @@ async def run_eu(cfg: EUConfig) -> None:
             pass
 
     tasks: List[asyncio.Task] = []
-    tasks.append(asyncio.create_task(eu_port_sync_loop(cfg, stop, dial_sem)))
+    tasks.append(asyncio.create_task(_supervise_task("EU:sync", stop, lambda: eu_port_sync_loop(cfg, stop, dial_sem))))
     for i in range(cfg.pool_size):
-        tasks.append(asyncio.create_task(eu_reverse_worker(cfg, i + 1, stop, dial_sem)))
+        wid = i + 1
+        tasks.append(asyncio.create_task(_supervise_task(f"EU:worker:{wid}", stop, lambda wid=wid: eu_reverse_worker(cfg, wid, stop, dial_sem))))
 
     log.info(
         "[EU] Running | IRAN=%s bridge=%d sync=%d pool=%d",
@@ -526,6 +586,7 @@ class IRConfig:
     pool_size: int
     auto_sync: bool
     manual_ports: List[int]
+    token: str
 
 
 @dataclass
@@ -586,6 +647,9 @@ async def ir_accept_bridge(cfg: IRConfig, pool: BridgePool) -> None:
 
     async def on_connect(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         _tune_writer_socket(writer)
+        if not await _recv_and_check_auth(reader, cfg.token):
+            await _close_writer(writer)
+            return
         item = PooledConn(reader=reader, writer=writer, created_at=time.time())
         ok = await pool.put(item)
         if not ok:
@@ -611,15 +675,32 @@ async def ir_sync_listener(cfg: IRConfig, open_port_cb) -> None:
 
     async def on_sync(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         _tune_writer_socket(writer)
+        if not await _recv_and_check_auth(reader, cfg.token):
+            await _close_writer(writer)
+            return
         try:
             while True:
-                h = await reader.readexactly(1)
-                count = h[0]
+                # Try new framing first: b'PT1' + u16 count + ports...
+                peek = await reader.readexactly(3)
+                if peek == b"PT1":
+                    (count,) = struct.unpack("!H", await reader.readexactly(2))
+                    count = min(count, max(0, int(T.max_sync_ports)))
+                    ports: Set[int] = set()
+                    for _ in range(count):
+                        (p,) = struct.unpack("!H", await reader.readexactly(2))
+                        if 1 <= p <= 65535:
+                            ports.add(p)
+                    await open_port_cb(ports)
+                    continue
+
+                # Legacy framing fallback: 1-byte count already read as peek[0]
+                count = peek[0]
+                ports: Set[int] = set()
                 for _ in range(count):
-                    pd = await reader.readexactly(2)
-                    (p,) = struct.unpack("!H", pd)
+                    (p,) = struct.unpack("!H", await reader.readexactly(2))
                     if 1 <= p <= 65535:
-                        await open_port_cb(p)
+                        ports.add(p)
+                await open_port_cb(ports)
         except asyncio.IncompleteReadError:
             pass
         except Exception:
@@ -700,7 +781,9 @@ async def run_ir(cfg: IRConfig) -> None:
     active_ports: Dict[int, asyncio.AbstractServer] = {}
     active_lock = asyncio.Lock()
 
-    async def open_port(p: int) -> None:
+    desired_ports: Set[int] = set()
+
+    async def open_one_port(p: int) -> None:
         async with active_lock:
             if p in active_ports:
                 return
@@ -723,14 +806,44 @@ async def run_ir(cfg: IRConfig) -> None:
             active_ports[p] = server
             log.info("[IR] Port Active: %d", p)
 
+    async def apply_desired_ports(ports: Set[int]) -> None:
+        # AutoSync sends the full desired set each interval.
+        ports = set(int(p) for p in ports if 1 <= int(p) <= 65535)
+        ports.discard(cfg.bridge_port)
+        ports.discard(cfg.sync_port)
+
+        async with active_lock:
+            # Open newly desired ports
+            to_open = sorted(p for p in ports if p not in active_ports)
+            # Close ports no longer desired
+            to_close = sorted(p for p in active_ports.keys() if p not in ports)
+
+        for p in to_open:
+            await open_one_port(p)
+
+        if to_close:
+            async with active_lock:
+                for p in to_close:
+                    srv = active_ports.pop(p, None)
+                    if srv is None:
+                        continue
+                    try:
+                        srv.close()
+                    except Exception:
+                        pass
+                    log.info("[IR] Port Closed: %d", p)
+
+        desired_ports.clear()
+        desired_ports.update(ports)
+
     tasks: List[asyncio.Task] = []
     tasks.append(asyncio.create_task(ir_accept_bridge(cfg, pool)))
 
     if cfg.auto_sync:
-        tasks.append(asyncio.create_task(ir_sync_listener(cfg, open_port)))
+        tasks.append(asyncio.create_task(ir_sync_listener(cfg, apply_desired_ports)))
     else:
         for p in cfg.manual_ports:
-            await open_port(p)
+            await open_one_port(p)
         log.info("[IR] Manual ports opened: %s", ",".join(map(str, cfg.manual_ports)) or "(none)")
 
     async def pool_recycler() -> None:
@@ -743,7 +856,7 @@ async def run_ir(cfg: IRConfig) -> None:
                 pass
             await asyncio.sleep(max(5.0, min(30.0, T.pool_max_age / 2)))
 
-    tasks.append(asyncio.create_task(pool_recycler()))
+    tasks.append(asyncio.create_task(_supervise_task("IR:recycler", stop, pool_recycler)))
 
     log.info(
         "[IR] Running | bridge=%d sync=%d pool=%d autoSync=%s",
@@ -776,6 +889,88 @@ def read_line(prompt: Optional[str] = None) -> str:
     return s.strip()
 
 
+
+# ------------------------- Token auth -------------------------
+
+def _expand_path(p: str) -> str:
+    return str(Path(p).expanduser()) if p else p
+
+
+def _load_token_from_file(path: str) -> str:
+    try:
+        with open(_expand_path(path), "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+
+def _save_token_to_file(path: str, token: str) -> None:
+    try:
+        p = Path(_expand_path(path))
+        p.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if not p.exists():
+                p.touch(mode=0o600, exist_ok=True)
+        except Exception:
+            pass
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(token.strip() + "\n")
+        try:
+            os.chmod(str(p), 0o600)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def get_or_create_token(role: str) -> str:
+    if getattr(T, "token", ""):
+        return T.token.strip()
+
+    tok = _load_token_from_file(getattr(T, "token_file", "~/.pahlavi_token"))
+    if tok:
+        return tok
+
+    if sys.stdin.isatty():
+        entered = read_line("[AUTH] Enter token (blank=auto-generate on IR): ").strip()
+        if entered:
+            _save_token_to_file(getattr(T, "token_file", "~/.pahlavi_token"), entered)
+            return entered
+
+    if role.lower().startswith("ir"):
+        tok = secrets.token_urlsafe(32)
+        _save_token_to_file(getattr(T, "token_file", "~/.pahlavi_token"), tok)
+        log.warning("[AUTH] Generated token and saved to %s", _expand_path(getattr(T, "token_file", "~/.pahlavi_token")))
+        log.warning("[AUTH] Token: %s", tok)
+        return tok
+
+    return ""
+
+
+async def _send_auth(writer: asyncio.StreamWriter, token: str) -> None:
+    tb = (token or "").encode("utf-8")
+    if len(tb) > 4096:
+        tb = tb[:4096]
+    writer.write(b"PTK1" + struct.pack("!H", len(tb)) + tb)
+    await writer.drain()
+
+
+async def _recv_and_check_auth(reader: asyncio.StreamReader, expected_token: str) -> bool:
+    try:
+        hdr = await asyncio.wait_for(reader.readexactly(4), timeout=T.auth_timeout)
+        if hdr != b"PTK1":
+            return False
+        ln_b = await asyncio.wait_for(reader.readexactly(2), timeout=T.auth_timeout)
+        (ln,) = struct.unpack("!H", ln_b)
+        if ln < 0 or ln > 4096:
+            return False
+        tok_b = await asyncio.wait_for(reader.readexactly(ln), timeout=T.auth_timeout) if ln else b""
+        got = tok_b.decode("utf-8", errors="ignore")
+        return hmac.compare_digest((expected_token or "").strip(), got.strip())
+    except Exception:
+        return False
+
+
 def _parse_ports_csv(csv: str) -> List[int]:
     ports: List[int] = []
     for part in (csv or "").split(","):
@@ -802,6 +997,7 @@ def _parse_ports_csv(csv: str) -> List[int]:
 
 def main() -> None:
     _setup_logging()
+    _bump_nofile(_env_int("PAHLAVI_NOFILE_TARGET", 65535))
 
     # expected input order (from your shell wrapper):
     # EU: 1, IRAN_IP, BRIDGE, SYNC
@@ -840,6 +1036,7 @@ def main() -> None:
                 pool_size=pool,
                 auto_sync=True,
                 manual_ports=[],
+                token=get_or_create_token("ir"),
             )
         else:
             ports_csv = read_line()
@@ -849,6 +1046,7 @@ def main() -> None:
                 pool_size=pool,
                 auto_sync=False,
                 manual_ports=_parse_ports_csv(ports_csv),
+                token=get_or_create_token("ir"),
             )
 
         asyncio.run(run_ir(cfg))
