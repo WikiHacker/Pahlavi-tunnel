@@ -42,9 +42,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import hmac
-import secrets
-from pathlib import Path
 import resource
 import signal
 import socket
@@ -285,12 +282,6 @@ def _tune_writer_socket(writer: asyncio.StreamWriter) -> None:
 
 
 
-async def _open_connection_ir(host: str, port: int, token: str) -> Tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-    """Dial TCP to IR and perform token auth (PTK1)."""
-    reader, writer = await _open_connection(host, port)
-    await _send_auth(writer, token)
-    return reader, writer
-
 async def _open_connection(host: str, port: int) -> Tuple[asyncio.StreamReader, asyncio.StreamWriter]:
     """Dial TCP with timeout + tuning."""
 
@@ -431,7 +422,6 @@ class EUConfig:
     bridge_port: int
     sync_port: int
     pool_size: int
-    token: str
 
 
 async def eu_port_sync_loop(cfg: EUConfig, stop: asyncio.Event, dial_sem: asyncio.Semaphore) -> None:
@@ -443,7 +433,7 @@ async def eu_port_sync_loop(cfg: EUConfig, stop: asyncio.Event, dial_sem: asynci
         writer: Optional[asyncio.StreamWriter] = None
         try:
             async with dial_sem:
-                reader, writer = await _open_connection_ir(cfg.iran_ip, cfg.sync_port, cfg.token)
+                reader, writer = await _open_connection(cfg.iran_ip, cfg.sync_port)
             _ = reader  # unused
             backoff = 0.5
             log.info("[EU] AutoSync connected -> %s:%s", cfg.iran_ip, cfg.sync_port)
@@ -484,7 +474,7 @@ async def eu_reverse_worker(cfg: EUConfig, worker_id: int, stop: asyncio.Event, 
         writer: Optional[asyncio.StreamWriter] = None
         try:
             async with dial_sem:
-                reader, writer = await _open_connection_ir(cfg.iran_ip, cfg.bridge_port, cfg.token)
+                reader, writer = await _open_connection(cfg.iran_ip, cfg.bridge_port)
             created_at = time.time()
             backoff = 0.2
 
@@ -586,7 +576,6 @@ class IRConfig:
     pool_size: int
     auto_sync: bool
     manual_ports: List[int]
-    token: str
 
 
 @dataclass
@@ -647,9 +636,6 @@ async def ir_accept_bridge(cfg: IRConfig, pool: BridgePool) -> None:
 
     async def on_connect(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         _tune_writer_socket(writer)
-        if not await _recv_and_check_auth(reader, cfg.token):
-            await _close_writer(writer)
-            return
         item = PooledConn(reader=reader, writer=writer, created_at=time.time())
         ok = await pool.put(item)
         if not ok:
@@ -675,9 +661,6 @@ async def ir_sync_listener(cfg: IRConfig, open_port_cb) -> None:
 
     async def on_sync(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         _tune_writer_socket(writer)
-        if not await _recv_and_check_auth(reader, cfg.token):
-            await _close_writer(writer)
-            return
         try:
             while True:
                 # Try new framing first: b'PT1' + u16 count + ports...
@@ -892,85 +875,6 @@ def read_line(prompt: Optional[str] = None) -> str:
 
 # ------------------------- Token auth -------------------------
 
-def _expand_path(p: str) -> str:
-    return str(Path(p).expanduser()) if p else p
-
-
-def _load_token_from_file(path: str) -> str:
-    try:
-        with open(_expand_path(path), "r", encoding="utf-8") as f:
-            return f.read().strip()
-    except Exception:
-        return ""
-
-
-def _save_token_to_file(path: str, token: str) -> None:
-    try:
-        p = Path(_expand_path(path))
-        p.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            if not p.exists():
-                p.touch(mode=0o600, exist_ok=True)
-        except Exception:
-            pass
-        with open(p, "w", encoding="utf-8") as f:
-            f.write(token.strip() + "\n")
-        try:
-            os.chmod(str(p), 0o600)
-        except Exception:
-            pass
-    except Exception:
-        pass
-
-
-def get_or_create_token(role: str) -> str:
-    if getattr(T, "token", ""):
-        return T.token.strip()
-
-    tok = _load_token_from_file(getattr(T, "token_file", "~/.pahlavi_token"))
-    if tok:
-        return tok
-
-    if sys.stdin.isatty():
-        entered = read_line("[AUTH] Enter token (blank=auto-generate on IR): ").strip()
-        if entered:
-            _save_token_to_file(getattr(T, "token_file", "~/.pahlavi_token"), entered)
-            return entered
-
-    if role.lower().startswith("ir"):
-        tok = secrets.token_urlsafe(32)
-        _save_token_to_file(getattr(T, "token_file", "~/.pahlavi_token"), tok)
-        log.warning("[AUTH] Generated token and saved to %s", _expand_path(getattr(T, "token_file", "~/.pahlavi_token")))
-        log.warning("[AUTH] Token: %s", tok)
-        return tok
-
-    return ""
-
-
-async def _send_auth(writer: asyncio.StreamWriter, token: str) -> None:
-    tb = (token or "").encode("utf-8")
-    if len(tb) > 4096:
-        tb = tb[:4096]
-    writer.write(b"PTK1" + struct.pack("!H", len(tb)) + tb)
-    await writer.drain()
-
-
-async def _recv_and_check_auth(reader: asyncio.StreamReader, expected_token: str) -> bool:
-    try:
-        hdr = await asyncio.wait_for(reader.readexactly(4), timeout=T.auth_timeout)
-        if hdr != b"PTK1":
-            return False
-        ln_b = await asyncio.wait_for(reader.readexactly(2), timeout=T.auth_timeout)
-        (ln,) = struct.unpack("!H", ln_b)
-        if ln < 0 or ln > 4096:
-            return False
-        tok_b = await asyncio.wait_for(reader.readexactly(ln), timeout=T.auth_timeout) if ln else b""
-        got = tok_b.decode("utf-8", errors="ignore")
-        return hmac.compare_digest((expected_token or "").strip(), got.strip())
-    except Exception:
-        return False
-
-
 def _parse_ports_csv(csv: str) -> List[int]:
     ports: List[int] = []
     for part in (csv or "").split(","):
@@ -1036,7 +940,6 @@ def main() -> None:
                 pool_size=pool,
                 auto_sync=True,
                 manual_ports=[],
-                token=get_or_create_token("ir"),
             )
         else:
             ports_csv = read_line()
@@ -1046,7 +949,6 @@ def main() -> None:
                 pool_size=pool,
                 auto_sync=False,
                 manual_ports=_parse_ports_csv(ports_csv),
-                token=get_or_create_token("ir"),
             )
 
         asyncio.run(run_ir(cfg))
