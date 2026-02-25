@@ -3,7 +3,7 @@ set -euo pipefail
 
 APP_NAME="Pahlavi"
 TG_ID="@IlyaahD"
-VERSION="4.0.0"
+VERSION="2.0.0"
 
 GITHUB_REPO="github.com/Zehnovik/Pahlavi-tunnel"
 
@@ -281,46 +281,26 @@ run_slot(){
   [[ -f "$f" ]] || { echo "Profile not found: $prof" > /dev/tty; return 1; }
   # shellcheck disable=SC1090
   source "$f"
+
   local s; s="$(session_name "$prof")"
   screen -S "$s" -X quit >/dev/null 2>&1 || true
 
-  if [[ "$ROLE" == "eu" ]]; then
-    if [[ "${EU_AUTOSYNC:-true}" == "true" ]]; then
-      screen -dmS "$s" bash -lc "ulimit -Hn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; ulimit -Sn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; printf '1\n%s\n%s\n%s\ny\n' '$IRAN_IP' '$BRIDGE' '$SYNC' | PAHLAVI_POOL=\"${PAHLAVI_POOL:-0}\" python3 '$PY'"
-    else
-      screen -dmS "$s" bash -lc "ulimit -Hn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; ulimit -Sn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; printf '1\n%s\n%s\n%s\nn\n' '$IRAN_IP' '$BRIDGE' '$SYNC' | PAHLAVI_POOL=\"${PAHLAVI_POOL:-0}\" python3 '$PY'"
-    fi
+  # common prelude for spawned session
+  local prelude
+  prelude="ulimit -Hn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; ulimit -Sn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; "
+
+  if [[ "${ROLE}" == "eu" ]]; then
+    local yn="y"
+    if [[ "${EU_AUTOSYNC:-true}" != "true" ]]; then yn="n"; fi
+    screen -dmS "$s" bash -lc "${prelude}printf '1\n%s\n%s\n%s\n%s\n' \"${IRAN_IP}\" \"${BRIDGE}\" \"${SYNC}\" \"${yn}\" | PAHLAVI_POOL=\"${PAHLAVI_POOL:-0}\" python3 \"${PY}\""
   else
-      screen -dmS "$s" bash -lc "ulimit -Hn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; ulimit -Sn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; printf '1
-%s
-%s
-%s
-n
-' '$IRAN_IP' '$BRIDGE' '$SYNC' | PAHLAVI_POOL=\"${PAHLAVI_POOL:-0}\" python3 '$PY'"
-    fi
-  else
-      screen -dmS "$s" bash -lc "ulimit -Hn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; ulimit -Sn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; printf '1
-%s
-%s
-%s
-n
-' '\$IRAN_IP' '\$BRIDGE' '\$SYNC' | PAHLAVI_POOL=\"${PAHLAVI_POOL:-0}\" python3 '\$PY'"
-    fi
-  else
-    screen -dmS "$s" bash -lc "ulimit -Hn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; ulimit -Sn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; printf '1
-%s
-%s
-%s
-n
-' '$IRAN_IP' '$BRIDGE' '$SYNC' | PAHLAVI_POOL="${PAHLAVI_POOL:-0}" python3 '$PY'"
-  fi
-else
     if [[ "${AUTO_SYNC:-true}" == "true" ]]; then
-      screen -dmS "$s" bash -lc "ulimit -Hn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; ulimit -Sn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; printf '2\n%s\n%s\ny\n' '$BRIDGE' '$SYNC' | PAHLAVI_POOL="${PAHLAVI_POOL:-0}" python3 '$PY'"
+      screen -dmS "$s" bash -lc "${prelude}printf '2\n%s\n%s\ny\n' \"${BRIDGE}\" \"${SYNC}\" | PAHLAVI_POOL=\"${PAHLAVI_POOL:-0}\" python3 \"${PY}\""
     else
-      screen -dmS "$s" bash -lc "ulimit -Hn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; ulimit -Sn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; printf '2\n%s\n%s\nn\n%s\n' '$BRIDGE' '$SYNC' '${PORTS:-}' | PAHLAVI_POOL="${PAHLAVI_POOL:-0}" python3 '$PY'"
+      screen -dmS "$s" bash -lc "${prelude}printf '2\n%s\n%s\nn\n%s\n' \"${BRIDGE}\" \"${SYNC}\" \"${PORTS:-}\" | PAHLAVI_POOL=\"${PAHLAVI_POOL:-0}\" python3 \"${PY}\""
     fi
   fi
+
   echo "[+] Started: $s" > /dev/tty
 }
 stop_slot(){ local prof="$1" s; s="$(session_name "$prof")"; screen -S "$s" -X quit >/dev/null 2>&1 || true; echo "[+] Stopped: $s" > /dev/tty; }
