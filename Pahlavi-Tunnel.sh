@@ -3,7 +3,7 @@ set -euo pipefail
 
 APP_NAME="Pahlavi"
 TG_ID="@IlyaahD"
-VERSION="4.0.0"
+VERSION="2.0.0"
 
 GITHUB_REPO="github.com/Zehnovik/Pahlavi-tunnel"
 
@@ -37,6 +37,35 @@ fi
 need_root(){ [[ "$(id -u)" == "0" ]] || { echo "Run as root (sudo -i)"; exit 1; }; }
 pause(){ read -r -p "Press Enter to continue..." _ < /dev/tty || true; }
 have(){ command -v "$1" >/dev/null 2>&1; }
+
+# Port helpers
+port_pids(){
+  local port="$1"
+  ss -ltnp "( sport = :${port} )" 2>/dev/null | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | sort -u || true
+}
+kill_port_listeners(){
+  local port="$1" pids
+  pids="$(port_pids "$port")"
+  [[ -n "$pids" ]] || return 0
+  echo "[!] Port ${port} is in use by PID(s): ${pids}. Stopping them..." > /dev/tty
+  for pid in $pids; do
+    kill "$pid" >/dev/null 2>&1 || true
+  done
+  sleep 0.5
+  # force if still there
+  pids="$(port_pids "$port")"
+  if [[ -n "$pids" ]]; then
+    for pid in $pids; do
+      kill -9 "$pid" >/dev/null 2>&1 || true
+    done
+  fi
+}
+ports_look_running(){
+  local b="$1" s="$2"
+  ss -ltn "( sport = :${b} )" 2>/dev/null | grep -q LISTEN && return 0
+  ss -ltn "( sport = :${s} )" 2>/dev/null | grep -q LISTEN && return 0
+  return 1
+}
 
 apt_try_install(){
   export DEBIAN_FRONTEND=noninteractive
@@ -274,7 +303,19 @@ EOF
 session_name(){ echo "pahlavi_$1"; }
 is_running(){
   local prof="$1" s; s="$(session_name "$prof")"
-  screen -ls 2>/dev/null | grep -q "\.${s}[[:space:]]"
+  if screen -ls 2>/dev/null | grep -q "\.${s}[[:space:]]"; then
+    return 0
+  fi
+  # If screen session is gone but the core is still listening (stale run), treat as running
+  local f="$CONF/${prof}.env"
+  if [[ -f "$f" ]]; then
+    # shellcheck disable=SC1090
+    source "$f"
+    if [[ "${ROLE:-}" == "iran" ]]; then
+      ports_look_running "${BRIDGE:-}" "${SYNC:-}" && return 0 || true
+    fi
+  fi
+  return 1
 }
 run_slot(){
   local prof="$1" f="$CONF/${prof}.env"
@@ -288,6 +329,12 @@ run_slot(){
   # common prelude for spawned session
   local prelude
   prelude="ulimit -Hn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; ulimit -Sn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; "
+
+  # Ensure ports are free (common reason for 'OFF' stuck: stale listener outside screen)
+  if [[ "${ROLE}" == "iran" ]]; then
+    [[ -n "${BRIDGE:-}" ]] && kill_port_listeners "${BRIDGE}" || true
+    [[ -n "${SYNC:-}" ]] && kill_port_listeners "${SYNC}" || true
+  fi
 
   if [[ "${ROLE}" == "eu" ]]; then
     local yn="y"
