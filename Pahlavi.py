@@ -55,6 +55,18 @@ from typing import Dict, List, Optional, Set, Tuple, Callable
 
 # ------------------------- Helpers -------------------------
 
+
+# ------------------------- stdin-driven interface -------------------------
+def read_line(prompt: str | None = None) -> str:
+    """Read one line from stdin (used by the bash manager). Returns "" on EOF."""
+    if prompt:
+        print(prompt, end="", flush=True)
+    import sys
+    s = sys.stdin.readline()
+    if not s:
+        return ""
+    return s.strip()
+
 def _env_int(name: str, default: int) -> int:
     try:
         v = os.environ.get(name)
