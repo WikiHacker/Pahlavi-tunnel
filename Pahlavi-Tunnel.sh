@@ -3,7 +3,7 @@ set -euo pipefail
 
 APP_NAME="Pahlavi"
 TG_ID="@IlyaahD"
-VERSION="2.2.0"
+VERSION="2.0.0"
 
 GITHUB_REPO="github.com/Zehnovik/Pahlavi-tunnel"
 
@@ -38,35 +38,6 @@ need_root(){ [[ "$(id -u)" == "0" ]] || { echo "Run as root (sudo -i)"; exit 1; 
 pause(){ read -r -p "Press Enter to continue..." _ < /dev/tty || true; }
 have(){ command -v "$1" >/dev/null 2>&1; }
 
-# Port helpers
-port_pids(){
-  local port="$1"
-  ss -ltnp "( sport = :${port} )" 2>/dev/null | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | sort -u || true
-}
-kill_port_listeners(){
-  local port="$1" pids
-  pids="$(port_pids "$port")"
-  [[ -n "$pids" ]] || return 0
-  echo "[!] Port ${port} is in use by PID(s): ${pids}. Stopping them..." > /dev/tty
-  for pid in $pids; do
-    kill "$pid" >/dev/null 2>&1 || true
-  done
-  sleep 0.5
-  # force if still there
-  pids="$(port_pids "$port")"
-  if [[ -n "$pids" ]]; then
-    for pid in $pids; do
-      kill -9 "$pid" >/dev/null 2>&1 || true
-    done
-  fi
-}
-ports_look_running(){
-  local b="$1" s="$2"
-  ss -ltn "( sport = :${b} )" 2>/dev/null | grep -q LISTEN && return 0
-  ss -ltn "( sport = :${s} )" 2>/dev/null | grep -q LISTEN && return 0
-  return 1
-}
-
 apt_try_install(){
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y >/dev/null 2>&1 || true
@@ -88,6 +59,7 @@ is_installed(){ [[ -x "$INSTALL_PATH" ]]; }
 ensure(){
   mkdir -p "$CONF"
   mkdir -p "$(dirname "$PY")"
+  mkdir -p "$BASE/logs"
   have screen  || apt_try_install screen
   have python3 || apt_try_install python3
   have curl    || apt_try_install curl
@@ -95,11 +67,29 @@ ensure(){
   have ss      || apt_try_install iproute2
   have crontab || apt_try_install cron
 
-  if [[ ! -f "$PY" ]]; then
-    echo "[*] Python core not found. Downloading: $PY_URL" > /dev/tty
-    fetch_url_to "$PY_URL" "$PY"
-    chmod +x "$PY" || true
+  # Always keep Python core in sync with GitHub unless PAHLAVI_NO_UPDATE_CORE=1
+  if [[ "${PAHLAVI_NO_UPDATE_CORE:-0}" != "1" ]]; then
+    local tmp; tmp="$(mktemp)"
+    echo "[*] Checking Python core: $PY" > /dev/tty
+    if fetch_url_to "$PY_URL" "$tmp"; then
+      if [[ ! -f "$PY" ]] || ! cmp -s "$tmp" "$PY"; then
+        echo "[*] Updating Python core from: $PY_URL" > /dev/tty
+        mv -f "$tmp" "$PY"
+        chmod +x "$PY" || true
+      else
+        rm -f "$tmp"
+      fi
+    else
+      rm -f "$tmp" || true
+    fi
+  else
+    if [[ ! -f "$PY" ]]; then
+      echo "[*] Python core not found. Downloading: $PY_URL" > /dev/tty
+      fetch_url_to "$PY_URL" "$PY"
+      chmod +x "$PY" || true
+    fi
   fi
+
   [[ -f "$PY" ]] || { echo "Missing python file: $PY"; exit 1; }
 }
 
@@ -303,19 +293,7 @@ EOF
 session_name(){ echo "pahlavi_$1"; }
 is_running(){
   local prof="$1" s; s="$(session_name "$prof")"
-  if screen -ls 2>/dev/null | grep -q "\.${s}[[:space:]]"; then
-    return 0
-  fi
-  # If screen session is gone but the core is still listening (stale run), treat as running
-  local f="$CONF/${prof}.env"
-  if [[ -f "$f" ]]; then
-    # shellcheck disable=SC1090
-    source "$f"
-    if [[ "${ROLE:-}" == "iran" ]]; then
-      ports_look_running "${BRIDGE:-}" "${SYNC:-}" && return 0 || true
-    fi
-  fi
-  return 1
+  screen -ls 2>/dev/null | grep -q "\.${s}[[:space:]]"
 }
 run_slot(){
   local prof="$1" f="$CONF/${prof}.env"
@@ -324,31 +302,37 @@ run_slot(){
   source "$f"
 
   local s; s="$(session_name "$prof")"
+  local logf="$BASE/logs/${s}.log"
+  mkdir -p "$BASE/logs"
+  : >"$logf" || true
+
   screen -S "$s" -X quit >/dev/null 2>&1 || true
 
   # common prelude for spawned session
   local prelude
   prelude="ulimit -Hn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; ulimit -Sn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; "
 
-  # Ensure ports are free (common reason for 'OFF' stuck: stale listener outside screen)
-  if [[ "${ROLE}" == "iran" ]]; then
-    [[ -n "${BRIDGE:-}" ]] && kill_port_listeners "${BRIDGE}" || true
-    [[ -n "${SYNC:-}" ]] && kill_port_listeners "${SYNC}" || true
-  fi
-
   if [[ "${ROLE}" == "eu" ]]; then
     local yn="y"
     if [[ "${EU_AUTOSYNC:-true}" != "true" ]]; then yn="n"; fi
-    screen -dmS "$s" bash -lc "${prelude}printf '1\n%s\n%s\n%s\n%s\n' \"${IRAN_IP}\" \"${BRIDGE}\" \"${SYNC}\" \"${yn}\" | PAHLAVI_POOL=\"${PAHLAVI_POOL:-0}\" python3 \"${PY}\""
+    screen -dmS "$s" bash -lc "${prelude}printf '1\n%s\n%s\n%s\n%s\n' \"${IRAN_IP}\" \"${BRIDGE}\" \"${SYNC}\" \"${yn}\" | PAHLAVI_POOL=\"${PAHLAVI_POOL:-0}\" python3 \"${PY}\" >>\"${logf}\" 2>&1"
   else
     if [[ "${AUTO_SYNC:-true}" == "true" ]]; then
-      screen -dmS "$s" bash -lc "${prelude}printf '2\n%s\n%s\ny\n' \"${BRIDGE}\" \"${SYNC}\" | PAHLAVI_POOL=\"${PAHLAVI_POOL:-0}\" python3 \"${PY}\""
+      screen -dmS "$s" bash -lc "${prelude}printf '2\n%s\n%s\ny\n' \"${BRIDGE}\" \"${SYNC}\" | PAHLAVI_POOL=\"${PAHLAVI_POOL:-0}\" python3 \"${PY}\" >>\"${logf}\" 2>&1"
     else
-      screen -dmS "$s" bash -lc "${prelude}printf '2\n%s\n%s\nn\n%s\n' \"${BRIDGE}\" \"${SYNC}\" \"${PORTS:-}\" | PAHLAVI_POOL=\"${PAHLAVI_POOL:-0}\" python3 \"${PY}\""
+      screen -dmS "$s" bash -lc "${prelude}printf '2\n%s\n%s\nn\n%s\n' \"${BRIDGE}\" \"${SYNC}\" \"${PORTS:-}\" | PAHLAVI_POOL=\"${PAHLAVI_POOL:-0}\" python3 \"${PY}\" >>\"${logf}\" 2>&1"
     fi
   fi
 
-  echo "[+] Started: $s" > /dev/tty
+  # Give it a moment: if it exits immediately, show the error log.
+  sleep 0.3
+  if ! is_running "$prof"; then
+    echo "[-] Failed to start (screen exited). See log: ${logf}" > /dev/tty
+    tail -n 80 "$logf" > /dev/tty 2>/dev/null || true
+    return 1
+  fi
+
+  echo "[+] Started: $s (log: $logf)" > /dev/tty
 }
 stop_slot(){ local prof="$1" s; s="$(session_name "$prof")"; screen -S "$s" -X quit >/dev/null 2>&1 || true; echo "[+] Stopped: $s" > /dev/tty; }
 restart_slot(){ local prof="$1"; stop_slot "$prof" >/dev/null 2>&1 || true; sleep 0.5; run_slot "$prof"; }
