@@ -163,11 +163,11 @@ class Tunables:
     keepalive_secs: int = _env_int("PAHLAVI_KEEPALIVE_SECS", 20)
 
     # Old version forced 8MB buffers per socket, which can hurt stability at scale.
-    # Default: don't override OS autotuning (set PAHLAVI_SOCKBUF to enable).
-    sockbuf: int = _env_int("PAHLAVI_SOCKBUF", 0)
+    # Default: 8MB socket buffers for higher throughput (override via PAHLAVI_SOCKBUF).
+    sockbuf: int = _env_int("PAHLAVI_SOCKBUF", 8 * 1024 * 1024)
 
-    # Copy chunk for proxying. Old was 256KB (too much RAM per connection).
-    copy_chunk: int = _env_int("PAHLAVI_COPY_CHUNK", 64 * 1024)
+    # Copy chunk for proxying. Default set to 256KB for throughput (override via PAHLAVI_COPY_CHUNK).
+    copy_chunk: int = _env_int("PAHLAVI_COPY_CHUNK", 256 * 1024)
 
     sync_interval: float = _env_float("PAHLAVI_SYNC_INTERVAL", 3.0)
 
@@ -176,7 +176,7 @@ class Tunables:
     backlog_sync: int = _env_int("PAHLAVI_BACKLOG_SYNC", 1024)
 
     # Backpressure threshold for asyncio StreamWriter buffer.
-    drain_threshold: int = _env_int("PAHLAVI_DRAIN_THRESHOLD", 256 * 1024)
+    drain_threshold: int = _env_int("PAHLAVI_DRAIN_THRESHOLD", 1024 * 1024)
 
     # AutoSync protocol limit (can be >255 with PT1 framing).
     max_sync_ports: int = _env_int("PAHLAVI_MAX_SYNC_PORTS", 512)
