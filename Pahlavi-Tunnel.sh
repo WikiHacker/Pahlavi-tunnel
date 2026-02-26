@@ -3,7 +3,7 @@ set -euo pipefail
 
 APP_NAME="Pahlavi"
 TG_ID="@IlyaahD"
-VERSION="2.2.1"
+VERSION="2.0.0"
 
 GITHUB_REPO="github.com/Zehnovik/Pahlavi-tunnel"
 
@@ -59,7 +59,6 @@ is_installed(){ [[ -x "$INSTALL_PATH" ]]; }
 ensure(){
   mkdir -p "$CONF"
   mkdir -p "$(dirname "$PY")"
-  mkdir -p "$BASE/logs"
   have screen  || apt_try_install screen
   have python3 || apt_try_install python3
   have curl    || apt_try_install curl
@@ -67,29 +66,11 @@ ensure(){
   have ss      || apt_try_install iproute2
   have crontab || apt_try_install cron
 
-  # Always keep Python core in sync with GitHub unless PAHLAVI_NO_UPDATE_CORE=1
-  if [[ "${PAHLAVI_NO_UPDATE_CORE:-0}" != "1" ]]; then
-    local tmp; tmp="$(mktemp)"
-    echo "[*] Checking Python core: $PY" > /dev/tty
-    if fetch_url_to "$PY_URL" "$tmp"; then
-      if [[ ! -f "$PY" ]] || ! cmp -s "$tmp" "$PY"; then
-        echo "[*] Updating Python core from: $PY_URL" > /dev/tty
-        mv -f "$tmp" "$PY"
-        chmod +x "$PY" || true
-      else
-        rm -f "$tmp"
-      fi
-    else
-      rm -f "$tmp" || true
-    fi
-  else
-    if [[ ! -f "$PY" ]]; then
-      echo "[*] Python core not found. Downloading: $PY_URL" > /dev/tty
-      fetch_url_to "$PY_URL" "$PY"
-      chmod +x "$PY" || true
-    fi
+  if [[ ! -f "$PY" ]]; then
+    echo "[*] Python core not found. Downloading: $PY_URL" > /dev/tty
+    fetch_url_to "$PY_URL" "$PY"
+    chmod +x "$PY" || true
   fi
-
   [[ -f "$PY" ]] || { echo "Missing python file: $PY"; exit 1; }
 }
 
@@ -254,15 +235,11 @@ edit_profile(){
     read -r -p "Iran IP: " IRAN_IP < /dev/tty
     read -r -p "Bridge port (e.g. 7000): " BRIDGE < /dev/tty
     read -r -p "Sync port   (e.g. 7001): " SYNC < /dev/tty
-    read -r -p "Enable Auto-Sync ports (EU -> IR)? (y/n) [y]: " AS_EU < /dev/tty
-    AS_EU="${AS_EU:-y}"
-    if [[ "${AS_EU,,}" == "y" ]]; then EU_AUTOSYNC=true; else EU_AUTOSYNC=false; fi
     cat >"$f" <<EOF
 ROLE=eu
 IRAN_IP=$IRAN_IP
 BRIDGE=$BRIDGE
 SYNC=$SYNC
-EU_AUTOSYNC=$EU_AUTOSYNC
 EOF
   else
     read -r -p "Bridge port (e.g. 7000): " BRIDGE < /dev/tty
@@ -300,39 +277,19 @@ run_slot(){
   [[ -f "$f" ]] || { echo "Profile not found: $prof" > /dev/tty; return 1; }
   # shellcheck disable=SC1090
   source "$f"
-
   local s; s="$(session_name "$prof")"
-  local logf="$BASE/logs/${s}.log"
-  mkdir -p "$BASE/logs"
-  : >"$logf" || true
-
   screen -S "$s" -X quit >/dev/null 2>&1 || true
 
-  # common prelude for spawned session
-  local prelude
-  prelude="ulimit -Hn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; ulimit -Sn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; "
-
-  if [[ "${ROLE}" == "eu" ]]; then
-    local yn="y"
-    if [[ "${EU_AUTOSYNC:-true}" != "true" ]]; then yn="n"; fi
-    screen -dmS "$s" bash -lc "${prelude}printf '1\n%s\n%s\n%s\n%s\n' \"${IRAN_IP}\" \"${BRIDGE}\" \"${SYNC}\" \"${yn}\" | PAHLAVI_POOL=\"${PAHLAVI_POOL:-0}\" python3 \"${PY}\" >>\"${logf}\" 2>&1"
+  if [[ "$ROLE" == "eu" ]]; then
+    screen -dmS "$s" bash -lc "ulimit -Hn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; ulimit -Sn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; printf '1\n%s\n%s\n%s\n' '$IRAN_IP' '$BRIDGE' '$SYNC' | PAHLAVI_POOL="${PAHLAVI_POOL:-0}" python3 '$PY'"
   else
     if [[ "${AUTO_SYNC:-true}" == "true" ]]; then
-      screen -dmS "$s" bash -lc "${prelude}printf '2\n%s\n%s\ny\n' \"${BRIDGE}\" \"${SYNC}\" | PAHLAVI_POOL=\"${PAHLAVI_POOL:-0}\" python3 \"${PY}\" >>\"${logf}\" 2>&1"
+      screen -dmS "$s" bash -lc "ulimit -Hn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; ulimit -Sn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; printf '2\n%s\n%s\ny\n' '$BRIDGE' '$SYNC' | PAHLAVI_POOL="${PAHLAVI_POOL:-0}" python3 '$PY'"
     else
-      screen -dmS "$s" bash -lc "${prelude}printf '2\n%s\n%s\nn\n%s\n' \"${BRIDGE}\" \"${SYNC}\" \"${PORTS:-}\" | PAHLAVI_POOL=\"${PAHLAVI_POOL:-0}\" python3 \"${PY}\" >>\"${logf}\" 2>&1"
+      screen -dmS "$s" bash -lc "ulimit -Hn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; ulimit -Sn ${ULIMIT_NOFILE:-1048576} >/dev/null 2>&1 || true; printf '2\n%s\n%s\nn\n%s\n' '$BRIDGE' '$SYNC' '${PORTS:-}' | PAHLAVI_POOL="${PAHLAVI_POOL:-0}" python3 '$PY'"
     fi
   fi
-
-  # Give it a moment: if it exits immediately, show the error log.
-  sleep 0.3
-  if ! is_running "$prof"; then
-    echo "[-] Failed to start (screen exited). See log: ${logf}" > /dev/tty
-    tail -n 80 "$logf" > /dev/tty 2>/dev/null || true
-    return 1
-  fi
-
-  echo "[+] Started: $s (log: $logf)" > /dev/tty
+  echo "[+] Started: $s" > /dev/tty
 }
 stop_slot(){ local prof="$1" s; s="$(session_name "$prof")"; screen -S "$s" -X quit >/dev/null 2>&1 || true; echo "[+] Stopped: $s" > /dev/tty; }
 restart_slot(){ local prof="$1"; stop_slot "$prof" >/dev/null 2>&1 || true; sleep 0.5; run_slot "$prof"; }
