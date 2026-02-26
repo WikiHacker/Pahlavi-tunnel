@@ -862,6 +862,7 @@ async def ir_handle_user(
         await _close_writer(europe.writer)
 
 
+
 async def run_ir(cfg: IRConfig) -> None:
     stop = asyncio.Event()
 
@@ -874,11 +875,10 @@ async def run_ir(cfg: IRConfig) -> None:
 
     pool = BridgePool(maxsize=cfg.pool_size * 2)
 
-
     session_sem: Optional[asyncio.Semaphore] = None
     if T.max_sessions and T.max_sessions > 0:
         session_sem = asyncio.Semaphore(T.max_sessions)
-    
+
     async def _with_session_limit(coro):
         if session_sem is None:
             return await coro
@@ -887,9 +887,62 @@ async def run_ir(cfg: IRConfig) -> None:
             return await coro
         finally:
             session_sem.release()
-    
+
+    active_ports: Dict[int, asyncio.AbstractServer] = {}
+    active_lock = asyncio.Lock()
+    desired_ports: Set[int] = set()
+
+    async def open_one_port(p: int) -> None:
+        async with active_lock:
+            if p in active_ports:
+                return
+
+            async def on_user(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+                await _with_session_limit(ir_handle_user(reader, writer, p, pool))
+
+            try:
+                server = await asyncio.start_server(
+                    on_user,
+                    host=T.ir_bind_host,
+                    port=p,
+                    backlog=T.backlog_ports,
+                    reuse_address=True,
+                )
+            except Exception as e:
+                log.warning("[IR] Cannot open port %d: %s", p, e)
+                return
+
+            active_ports[p] = server
+            log.info("[IR] Port Active: %d", p)
+
+    async def apply_desired_ports(ports: Set[int]) -> None:
+        ports = set(int(x) for x in ports if 1 <= int(x) <= 65535)
+        ports.discard(cfg.bridge_port)
+        ports.discard(cfg.sync_port)
+
+        async with active_lock:
+            to_open = sorted(p for p in ports if p not in active_ports)
+            to_close = sorted(p for p in active_ports.keys() if p not in ports)
+
+        for p in to_open:
+            await open_one_port(p)
+
+        if to_close:
+            async with active_lock:
+                for p in to_close:
+                    srv = active_ports.pop(p, None)
+                    if srv is None:
+                        continue
+                    try:
+                        srv.close()
+                    except Exception:
+                        pass
+                    log.info("[IR] Port Closed: %d", p)
+
+        desired_ports.clear()
+        desired_ports.update(ports)
+
     async def pool_pinger() -> None:
-        # Send lightweight heartbeat (port=0) over idle pool sockets to keep NAT mappings alive.
         if T.pool_ping_interval <= 0:
             return
         while not stop.is_set():
@@ -900,170 +953,69 @@ async def run_ir(cfg: IRConfig) -> None:
                     items.append(pool._q.get_nowait())
                 except asyncio.QueueEmpty:
                     break
+
             for it in items:
-                # Drop too-old
                 if time.time() - it.created_at > T.pool_max_age:
                     await _close_writer(it.writer)
                     continue
                 try:
-                    it.writer.write(struct.pack("!H", 0))
+                    it.writer.write(struct.pack("!H", 0))  # heartbeat
                     await asyncio.wait_for(it.writer.drain(), timeout=1.0)
                     await pool.put(it)
                 except Exception:
                     await _close_writer(it.writer)
-    
+
     async def pool_recycler() -> None:
         if T.pool_recycle_interval <= 0:
-            return
+            # still do a periodic recycle based on max age
+            interval = max(5.0, min(30.0, T.pool_max_age / 2))
+        else:
+            interval = T.pool_recycle_interval
         while not stop.is_set():
-            await asyncio.sleep(T.pool_recycle_interval)
+            await asyncio.sleep(interval)
             try:
                 removed = await pool.recycle_stale()
                 if removed:
-                    log.debug("[IR] Recycled %d stale pooled conns", removed)
+                    log.debug("[IR] Recycled %d stale pool conns", removed)
             except Exception:
                 pass
-    
-        active_ports: Dict[int, asyncio.AbstractServer] = {}
-        active_lock = asyncio.Lock()
-    
-        desired_ports: Set[int] = set()
-    
-        async def open_one_port(p: int) -> None:
-            async with active_lock:
-                if p in active_ports:
-                    return
-    
-                async def on_user(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-                    await _with_session_limit(ir_handle_user(reader, writer, p, pool))
-    
-                try:
-                    server = await asyncio.start_server(
-                        on_user,
-                        host=T.ir_bind_host,
-                        port=p,
-                        backlog=T.backlog_ports,
-                        reuse_address=True,
-                    )
-                except Exception as e:
-                    log.warning("[IR] Cannot open port %d: %s", p, e)
-                    return
-    
-                active_ports[p] = server
-                log.info("[IR] Port Active: %d", p)
-    
-        async def apply_desired_ports(ports: Set[int]) -> None:
-            # AutoSync sends the full desired set each interval.
-            ports = set(int(p) for p in ports if 1 <= int(p) <= 65535)
-            ports.discard(cfg.bridge_port)
-            ports.discard(cfg.sync_port)
-    
-            async with active_lock:
-                # Open newly desired ports
-                to_open = sorted(p for p in ports if p not in active_ports)
-                # Close ports no longer desired
-                to_close = sorted(p for p in active_ports.keys() if p not in ports)
-    
-            for p in to_open:
-                await open_one_port(p)
-    
-            if to_close:
-                async with active_lock:
-                    for p in to_close:
-                        srv = active_ports.pop(p, None)
-                        if srv is None:
-                            continue
-                        try:
-                            srv.close()
-                        except Exception:
-                            pass
-                        log.info("[IR] Port Closed: %d", p)
-    
-            desired_ports.clear()
-            desired_ports.update(ports)
-    
-        tasks: List[asyncio.Task] = []
-        tasks.append(asyncio.create_task(ir_accept_bridge(cfg, pool)))
-        tasks.append(asyncio.create_task(pool_pinger()))
-        tasks.append(asyncio.create_task(pool_recycler()))
-    
-        if cfg.auto_sync:
-            tasks.append(asyncio.create_task(ir_sync_listener(cfg, apply_desired_ports)))
-        else:
-            for p in cfg.manual_ports:
-                await open_one_port(p)
-            log.info("[IR] Manual ports opened: %s", ",".join(map(str, cfg.manual_ports)) or "(none)")
-    
-        async def pool_recycler() -> None:
-            while not stop.is_set():
-                try:
-                    removed = await pool.recycle_stale()
-                    if removed:
-                        log.debug("[IR] Recycled %d stale pool conns", removed)
-                except Exception:
-                    pass
-                await asyncio.sleep(max(5.0, min(30.0, T.pool_max_age / 2)))
-    
-        tasks.append(asyncio.create_task(_supervise_task("IR:recycler", stop, pool_recycler)))
-    
-        log.info(
-            "[IR] Running | bridge=%d sync=%d pool=%d autoSync=%s",
-            cfg.bridge_port,
-            cfg.sync_port,
-            cfg.pool_size,
-            cfg.auto_sync,
-        )
-    
-        await stop.wait()
-    
-        for t in tasks:
-            t.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-    
-        async with active_lock:
-            for srv in active_ports.values():
-                srv.close()
-            await asyncio.gather(*(srv.wait_closed() for srv in active_ports.values()), return_exceptions=True)
-    
-    
-    # ------------------------- stdin-driven interface -------------------------
-    
-    def read_line(prompt: Optional[str] = None) -> str:
-        if prompt:
-            print(prompt, end="", flush=True)
-        s = sys.stdin.readline()
-        if not s:
-            return ""
-        return s.strip()
-    
-    
-    
-    # ------------------------- Token auth -------------------------
-    
-    def _parse_ports_csv(csv: str) -> List[int]:
-        ports: List[int] = []
-        for part in (csv or "").split(","):
-            part = part.strip()
-            if not part:
-                continue
-            try:
-                p = int(part)
-            except Exception:
-                continue
-            if 1 <= p <= 65535:
-                ports.append(p)
-    
-        # de-dup but preserve order
-        seen: Set[int] = set()
-        out: List[int] = []
-        for p in ports:
-            if p in seen:
-                continue
-            seen.add(p)
-            out.append(p)
-        return out
-    
-    
+
+    tasks: List[asyncio.Task] = []
+    tasks.append(asyncio.create_task(_supervise_task("IR:bridge", stop, lambda: ir_accept_bridge(cfg, pool))))
+    tasks.append(asyncio.create_task(_supervise_task("IR:pinger", stop, pool_pinger)))
+    tasks.append(asyncio.create_task(_supervise_task("IR:recycler", stop, pool_recycler)))
+
+    if cfg.auto_sync:
+        tasks.append(asyncio.create_task(_supervise_task("IR:sync", stop, lambda: ir_sync_listener(cfg, apply_desired_ports))))
+    else:
+        for p in cfg.manual_ports:
+            await open_one_port(p)
+        log.info("[IR] Manual ports opened: %s", ",".join(map(str, cfg.manual_ports)) or "(none)")
+
+    log.info(
+        "[IR] Running | bridge=%d sync=%d pool=%d autoSync=%s",
+        cfg.bridge_port,
+        cfg.sync_port,
+        cfg.pool_size,
+        cfg.auto_sync,
+    )
+
+    await stop.wait()
+
+    for t in tasks:
+        t.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+    async with active_lock:
+        srvs = list(active_ports.values())
+        active_ports.clear()
+    for srv in srvs:
+        try:
+            srv.close()
+        except Exception:
+            pass
+    await asyncio.gather(*(srv.wait_closed() for srv in srvs), return_exceptions=True)
+
 def main() -> None:
     _setup_logging()
     _bump_nofile(_env_int("PAHLAVI_NOFILE_TARGET", 65535))
