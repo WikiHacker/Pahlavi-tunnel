@@ -67,6 +67,31 @@ def read_line(prompt: str | None = None) -> str:
         return ""
     return s.strip()
 
+
+def _parse_ports_csv(csv: str) -> List[int]:
+    """Parse comma-separated ports into a de-duplicated list preserving order."""
+    ports: List[int] = []
+    for part in (csv or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            p = int(part)
+        except Exception:
+            continue
+        if 1 <= p <= 65535:
+            ports.append(p)
+    # de-dup but preserve order
+    seen: Set[int] = set()
+    out: List[int] = []
+    for p in ports:
+        if p in seen:
+            continue
+        seen.add(p)
+        out.append(p)
+    return out
+
+
 def _env_int(name: str, default: int) -> int:
     try:
         v = os.environ.get(name)
