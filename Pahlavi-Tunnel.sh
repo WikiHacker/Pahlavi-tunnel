@@ -3,7 +3,7 @@ set -euo pipefail
 
 APP_NAME="Pahlavi"
 TG_ID="@IlyaahD"
-VERSION="2.2.0"
+VERSION="2.2.1"
 
 GITHUB_REPO="github.com/Zehnovik/Pahlavi-tunnel"
 
